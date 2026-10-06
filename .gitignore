@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.Python
+.venv/
+venv/
+env/
+
+# Local configuration and IDE state
+.env
+.env.*
+.vscode/
+.idea/
+
+# Databases and generated library data
+*.db
+*.sqlite
+*.sqlite3
+qrcodes/
+cards/
+avatars/
+laporan/
+card_creation.log
+
+# Build and installer output
+build/
+dist/
+installer/
+*.spec
+*.exe
+*.msi
+*.iss
+
+# Local test/debug output
+.pytest_cache/
+.coverage
+htmlcov/

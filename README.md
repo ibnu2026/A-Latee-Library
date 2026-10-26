@@ -108,6 +108,8 @@ Generated databases, QR codes, reports, and build artifacts are local applicatio
 - Windows: `%APPDATA%\Latee Library\library_data.db`
 - Backup: `%USERPROFILE%\Documents\Latee Library\`
 
+The application uses the database in the current Windows user's AppData folder. The NSIS installer only copies its starter database when this file does not already exist, so installing an update will not replace existing AppData data. Use the same Windows account that owns the existing database, and make a backup before installing an update.
+
 ---
 
 ## 🚀 Installation (NSIS)

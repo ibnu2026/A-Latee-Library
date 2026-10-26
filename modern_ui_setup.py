@@ -13,10 +13,11 @@ class TextScaleController(QtCore.QObject):
 
     def __init__(self, main_window, scale_label, smaller_button, larger_button):
         super().__init__(main_window)
+        self.main_window = main_window
         self.app = QtWidgets.QApplication.instance()
         self.settings = QtCore.QSettings("LateeLibrary", "Library")
         self.scale_label = scale_label
-        self.base_app_stylesheet = self.app.styleSheet()
+        self.base_app_stylesheet = self.app.styleSheet() if self.app else ""
         try:
             initial_scale = float(self.settings.value("ui/text_scale", 1.0))
         except (TypeError, ValueError):
@@ -24,10 +25,25 @@ class TextScaleController(QtCore.QObject):
 
         smaller_button.clicked.connect(lambda: self.set_scale(self.scale - 0.1))
         larger_button.clicked.connect(lambda: self.set_scale(self.scale + 0.1))
-        self.app.installEventFilter(self)
+        if self.app:
+            self.app.installEventFilter(self)
+        try:
+            main_window.destroyed.connect(self.cleanup)
+        except Exception:
+            pass
         self.set_scale(initial_scale)
 
+    def cleanup(self):
+        try:
+            if self.app:
+                self.app.removeEventFilter(self)
+                self.app = None
+        except Exception:
+            pass
+
     def _scale_stylesheet(self, stylesheet):
+        if not stylesheet:
+            return ""
         def replace_size(match):
             size = float(match.group(2)) * self.scale
             return f"{match.group(1)}{size:.1f}{match.group(3)}"
@@ -35,36 +51,59 @@ class TextScaleController(QtCore.QObject):
         return self.FONT_SIZE_PATTERN.sub(replace_size, stylesheet)
 
     def _capture_widget_base(self, widget):
-        if widget.property("_text_scale_style") is None:
-            widget.setProperty("_text_scale_style", widget.styleSheet())
-        if widget.property("_text_scale_font") is None:
-            widget.setProperty("_text_scale_font", QtGui.QFont(widget.font()))
+        try:
+            if widget.property("_text_scale_style") is None:
+                widget.setProperty("_text_scale_style", widget.styleSheet())
+            if widget.property("_text_scale_font") is None:
+                widget.setProperty("_text_scale_font", QtGui.QFont(widget.font()))
+        except Exception:
+            pass
 
     def _apply_widget_scale(self, widget):
-        self._capture_widget_base(widget)
-        widget.setStyleSheet(self._scale_stylesheet(widget.property("_text_scale_style")))
-        base_font = widget.property("_text_scale_font")
-        scaled_font = QtGui.QFont(base_font)
-        if base_font.pointSizeF() > 0:
-            scaled_font.setPointSizeF(max(7.0, base_font.pointSizeF() * self.scale))
-        elif base_font.pixelSize() > 0:
-            scaled_font.setPixelSize(max(9, round(base_font.pixelSize() * self.scale)))
-        widget.setFont(scaled_font)
+        try:
+            self._capture_widget_base(widget)
+            style = widget.property("_text_scale_style")
+            if style:
+                widget.setStyleSheet(self._scale_stylesheet(style))
+            base_font = widget.property("_text_scale_font")
+            if base_font:
+                scaled_font = QtGui.QFont(base_font)
+                if base_font.pointSizeF() > 0:
+                    scaled_font.setPointSizeF(max(7.0, base_font.pointSizeF() * self.scale))
+                elif base_font.pixelSize() > 0:
+                    scaled_font.setPixelSize(max(9, round(base_font.pixelSize() * self.scale)))
+                widget.setFont(scaled_font)
+        except Exception:
+            pass
 
     def set_scale(self, scale):
-        self.scale = round(max(0.8, min(1.5, scale)), 1)
-        widgets = self.app.allWidgets()
-        for widget in widgets:
-            self._capture_widget_base(widget)
-        self.app.setStyleSheet(self._scale_stylesheet(self.base_app_stylesheet))
-        for widget in widgets:
-            self._apply_widget_scale(widget)
-        self.scale_label.setText(f"{round(self.scale * 100)}%")
-        self.settings.setValue("ui/text_scale", self.scale)
+        try:
+            self.scale = round(max(0.8, min(1.5, scale)), 1)
+            if not self.app:
+                return
+            widgets = self.app.allWidgets()
+            for widget in widgets:
+                self._capture_widget_base(widget)
+            if self.base_app_stylesheet:
+                self.app.setStyleSheet(self._scale_stylesheet(self.base_app_stylesheet))
+            for widget in widgets:
+                self._apply_widget_scale(widget)
+            if self.scale_label:
+                self.scale_label.setText(f"{round(self.scale * 100)}%")
+            self.settings.setValue("ui/text_scale", self.scale)
+        except Exception:
+            pass
 
     def eventFilter(self, watched, event):
-        if event.type() == QtCore.QEvent.Show and isinstance(watched, QtWidgets.QWidget):
-            self._apply_widget_scale(watched)
+        try:
+            if event.type() == QtCore.QEvent.Show and isinstance(watched, QtWidgets.QWidget):
+                # Hanya terapkan scaling pada widget milik MainWindow yang aktif
+                parent_win = self.main_window
+                if parent_win and not parent_win.isHidden():
+                    if watched == parent_win or watched.window() == parent_win:
+                        self._apply_widget_scale(watched)
+        except Exception:
+            pass
         return False
 
 def setup_modern_ui(main_window):

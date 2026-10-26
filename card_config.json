@@ -1,0 +1,31 @@
+{
+  "depan.jpg": {
+    "description": "Desain depan kartu anggota dengan QR code dan QR ID",
+    "qr_position": {
+      "x": 0.32,
+      "y": 0.35,
+      "size_percent": 0.25,
+      "align": "center",
+      "description": "QR code di tengah kartu"
+    },
+    "qr_id": {
+      "enabled": true,
+      "x": 0.78,
+      "y": 0.45,
+      "font_size_percent": 0.05,
+      "color": [0, 0, 0],
+      "format": "{barcode}",
+      "description": "QR ID (hanya barcode, tanpa prefix) ditampilkan di area putih sebelah kanan, di bawah tulisan 'berlaku 3 tahun'"
+    },
+    "note": "Tata letak kartu: QR Code (tengah) + QR ID barcode (area putih kanan)"
+  },
+  "belakang.jpg": {
+    "description": "Desain belakang kartu anggota",
+    "qr_position": {
+      "x": 0.5,
+      "y": 0.5,
+      "size_percent": 0.3,
+      "align": "center"
+    }
+  }
+}

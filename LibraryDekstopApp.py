@@ -221,6 +221,7 @@ class VisitorRegistrationDialog(QtWidgets.QDialog):
         "PRA-DL",
         "KBS"
     ]
+    ROOMS = [str(i) for i in range(1, 31)]
     
     def __init__(self, parent=None, db=None):
         super().__init__(parent)
@@ -248,7 +249,7 @@ class VisitorRegistrationDialog(QtWidgets.QDialog):
         # Nomor Kamar
         layout.addWidget(QtWidgets.QLabel("Nomor Kamar:"))
         self.kamar_combo = QtWidgets.QComboBox()
-        self.kamar_combo.addItems([str(i) for i in range(1, 31)])
+        self.kamar_combo.addItems(self.ROOMS)
         layout.addWidget(self.kamar_combo)
 
         self.fingerprint = None
@@ -779,6 +780,8 @@ class RegisteredVisitorsDialog(QtWidgets.QDialog):
         self.table.setColumnCount(5)
         self.table.setHorizontalHeaderLabels(["ID", "Nama", "Rayon", "Kamar", "Fingerprint ID"])
         self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.show_visitor_context_menu)
         layout.addWidget(self.table)
         
         # Close button
@@ -810,6 +813,94 @@ class RegisteredVisitorsDialog(QtWidgets.QDialog):
             self.table.resizeColumnsToContents()
         except Exception as e:
             print(f"Error loading visitors: {e}")
+
+    def show_visitor_context_menu(self, position):
+        row = self.table.rowAt(position.y())
+        if row < 0:
+            return
+
+        visitor_id_item = self.table.item(row, 0)
+        if not visitor_id_item:
+            return
+
+        menu = QtWidgets.QMenu(self)
+        action_edit = menu.addAction("Edit Data")
+        if menu.exec_(self.table.mapToGlobal(position)) == action_edit:
+            self.edit_visitor_data(int(visitor_id_item.text()))
+
+    def edit_visitor_data(self, visitor_id):
+        try:
+            cursor = self.db.conn.cursor()
+            cursor.execute(
+                "SELECT nama, rayon, kamar FROM visitors WHERE id = ?",
+                (visitor_id,)
+            )
+            visitor = cursor.fetchone()
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Gagal", f"Gagal memuat data pengunjung:\n{e}")
+            return
+
+        if not visitor:
+            QtWidgets.QMessageBox.warning(self, "Data Tidak Ditemukan", "Data pengunjung sudah tidak tersedia.")
+            self.load_visitors()
+            return
+
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Edit Data Pengunjung")
+        dialog.setMinimumWidth(360)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        form = QtWidgets.QFormLayout()
+
+        nama_input = QtWidgets.QLineEdit(visitor[0] or "")
+        rayon_input = QtWidgets.QComboBox()
+        rayon_input.addItems(VisitorRegistrationDialog.RAYONS)
+        rayon = visitor[1] or ""
+        if rayon and rayon_input.findText(rayon) < 0:
+            rayon_input.addItem(rayon)
+        rayon_input.setCurrentText(rayon)
+
+        kamar_input = QtWidgets.QComboBox()
+        kamar_input.addItems(VisitorRegistrationDialog.ROOMS)
+        kamar = str(visitor[2] or "")
+        if kamar and kamar_input.findText(kamar) < 0:
+            kamar_input.addItem(kamar)
+        kamar_input.setCurrentText(kamar)
+        form.addRow("Nama:", nama_input)
+        form.addRow("Rayon:", rayon_input)
+        form.addRow("Kamar:", kamar_input)
+        layout.addLayout(form)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Save | QtWidgets.QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec_() != QtWidgets.QDialog.Accepted:
+            return
+
+        nama = nama_input.text().strip()
+        if not nama:
+            QtWidgets.QMessageBox.warning(self, "Validasi", "Nama pengunjung wajib diisi.")
+            return
+
+        try:
+            if not self.db.update_visitor(
+                visitor_id,
+                nama=nama,
+                rayon=rayon_input.currentText(),
+                kamar=kamar_input.currentText()
+            ):
+                raise ValueError("Data pengunjung tidak berhasil diperbarui.")
+
+            self.load_visitors()
+            parent_window = self.parent()
+            if parent_window and hasattr(parent_window, "load_visitors"):
+                parent_window.load_visitors()
+            QtWidgets.QMessageBox.information(self, "Berhasil", "Data pengunjung berhasil diperbarui.")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Gagal", f"Gagal memperbarui data pengunjung:\n{e}")
     
     def filter_visitors(self):
         """Filter visitors based on search input"""
@@ -1551,6 +1642,13 @@ class Database:
             self.conn.commit()
             print("[OK] Kolom 'denda' berhasil ditambahkan ke tabel borrows")
 
+        c.execute("PRAGMA table_info(sale_items)")
+        sale_item_columns = [column[1] for column in c.fetchall()]
+        if "harga_asli" not in sale_item_columns:
+            c.execute("ALTER TABLE sale_items ADD COLUMN harga_asli REAL")
+            self.conn.commit()
+            print("[OK] Kolom 'harga_asli' berhasil ditambahkan ke tabel sale_items")
+
         for audit_column in ('dibuat_oleh', 'dikembalikan_oleh', 'denda_dibuat_oleh', 'denda_dibayar_oleh'):
             if audit_column not in columns:
                 c.execute(f'ALTER TABLE borrows ADD COLUMN {audit_column} TEXT')
@@ -1833,14 +1931,6 @@ class Database:
         c = self.conn.cursor()
         c.execute("SELECT id, judul, penulis, harga, barcode, stok FROM sale_products ORDER BY judul")
         return c.fetchall()
-
-    def add_sale_product_barcode(self, product_id, barcode):
-        c = self.conn.cursor()
-        c.execute("SELECT id FROM sale_products WHERE barcode=? AND id<>?", (barcode, product_id))
-        if c.fetchone():
-            raise ValueError("Barcode sudah digunakan oleh buku bazar lain.")
-        c.execute("UPDATE sale_products SET barcode=? WHERE id=?", (barcode, product_id))
-        self.conn.commit()
 
     def find_sale_product_by_barcode(self, barcode):
         c = self.conn.cursor()
@@ -3174,6 +3264,43 @@ class Database:
         self.conn.commit()
         return visitor_id
 
+    def update_visitor(self, visitor_id, nama, rayon, kamar):
+        """Update data pengunjung terdaftar tanpa mengubah riwayat kunjungannya."""
+        c = self.conn.cursor()
+        c.execute(
+            'UPDATE visitors SET nama=?, rayon=?, kamar=? WHERE id=?',
+            (nama, rayon, kamar, visitor_id)
+        )
+        self.conn.commit()
+        return c.rowcount > 0
+
+    def delete_visitor_visit(self, visit_id):
+        """Hapus satu catatan kunjungan dan sinkronkan waktu kunjungan terakhir."""
+        c = self.conn.cursor()
+        try:
+            c.execute(
+                'SELECT visitor_id FROM visitor_visits WHERE id=?',
+                (visit_id,)
+            )
+            row = c.fetchone()
+            if not row:
+                return False
+
+            visitor_id = row[0]
+            c.execute('DELETE FROM visitor_visits WHERE id=?', (visit_id,))
+            deleted = c.rowcount > 0
+            c.execute(
+                'UPDATE visitors SET waktu_kunjungan=('
+                'SELECT MAX(waktu_kunjungan) FROM visitor_visits WHERE visitor_id=?'
+                ') WHERE id=?',
+                (visitor_id, visitor_id)
+            )
+            self.conn.commit()
+            return deleted
+        except Exception:
+            self.conn.rollback()
+            raise
+
     def save_fingerprint_enrollment(self, santri_id, nama, template_bytes, rayon, kamar, quality=80):
         """
         Save enrolled fingerprint template from the ZKTeco reader.
@@ -3446,28 +3573,32 @@ class Database:
             days: Filter data dari N hari terakhir. Jika None, tampilkan semua.
         """
         c = self.conn.cursor()
+        limit_clause = "LIMIT ?" if limit is not None else ""
         if days is None:
             # Tampilkan semua data
-            c.execute('''
+            query = f'''
                 SELECT m.nama, COUNT(b.id) as count, m.kamar, m.rayon
                 FROM borrows b
                 LEFT JOIN members m ON b.member_id=m.id
                 WHERE m.nama IS NOT NULL
                 GROUP BY m.nama
                 ORDER BY count DESC
-                LIMIT ?
-            ''', (limit,))
+                {limit_clause}
+            '''
+            c.execute(query, (limit,) if limit is not None else ())
         else:
             # Filter berdasarkan tanggal
-            c.execute('''
+            query = f'''
                 SELECT m.nama, COUNT(b.id) as count, m.kamar, m.rayon
                 FROM borrows b
                 LEFT JOIN members m ON b.member_id=m.id
                 WHERE m.nama IS NOT NULL AND datetime(b.tanggal_pinjam) >= datetime('now', '-' || ? || ' days')
                 GROUP BY m.nama
                 ORDER BY count DESC
-                LIMIT ?
-            ''', (days, limit))
+                {limit_clause}
+            '''
+            params = (days, limit) if limit is not None else (days,)
+            c.execute(query, params)
         return c.fetchall()
 
     def get_top_borrow_rayon(self, limit=5, days=None):
@@ -3478,7 +3609,9 @@ class Database:
         if days is not None:
             date_filter = "AND datetime(b.tanggal_pinjam) >= datetime('now', '-' || ? || ' days')"
             params.append(days)
-        params.append(limit)
+        limit_clause = "LIMIT ?" if limit is not None else ""
+        if limit is not None:
+            params.append(limit)
         c.execute(f'''
             SELECT COALESCE(m.rayon, '-'), COUNT(b.id) AS count
             FROM borrows b
@@ -3486,7 +3619,7 @@ class Database:
             WHERE b.member_id IS NOT NULL {date_filter}
             GROUP BY m.rayon
             ORDER BY count DESC
-            LIMIT ?
+            {limit_clause}
         ''', params)
         return c.fetchall()
 
@@ -3670,103 +3803,30 @@ class LineChart(QtWidgets.QWidget):
 
         all_dates = dates_vis + dates_bor
         if not all_dates:
-            # fallback to current year monthly view
-            year = datetime.now().year
-            visitors = self.db.visitors_per_month(year)
-            borrows = self.db.borrows_per_month(year)
-            months = range(1, 13)
-            visitor_data = [visitors.get(m, 0) for m in months]
-            borrow_data = [borrows.get(m, 0) for m in months]
-            x_labels = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-            x_positions = list(months)
-            xlabel = 'Bulan'
+            end = datetime.now().date()
+            start = end - timedelta(days=29)
         else:
             start = min(all_dates).date()
             end = max(all_dates).date()
-            span_days = (end - start).days or 1
 
-            # Choose granularity
-            if span_days <= 60:
-                gran = 'day'
-            elif span_days <= 730:
-                gran = 'month'
-            else:
-                gran = 'year'
+        days = []
+        day = start
+        while day <= end:
+            days.append(day)
+            day += timedelta(days=1)
 
-            def mk_day_iter(s, e):
-                d = s
-                out = []
-                while d <= e:
-                    out.append(d)
-                    d += timedelta(days=1)
-                return out
+        visitor_counts = {day: 0 for day in days}
+        borrow_counts = {day: 0 for day in days}
+        for dt in dates_vis:
+            visitor_counts[dt.date()] += 1
+        for dt in dates_bor:
+            borrow_counts[dt.date()] += 1
 
-            def mk_month_iter(s, e):
-                out = []
-                y, m = s.year, s.month
-                while (y, m) <= (e.year, e.month):
-                    out.append((y, m))
-                    m += 1
-                    if m > 12:
-                        m = 1
-                        y += 1
-                return out
-
-            def mk_year_iter(s, e):
-                return list(range(s.year, e.year + 1))
-
-            if gran == 'day':
-                days = mk_day_iter(start, end)
-                visitor_counts = {d:0 for d in days}
-                borrow_counts = {d:0 for d in days}
-                for dt in dates_vis:
-                    key = dt.date()
-                    if key in visitor_counts:
-                        visitor_counts[key] += 1
-                for dt in dates_bor:
-                    key = dt.date()
-                    if key in borrow_counts:
-                        borrow_counts[key] += 1
-                x_positions = list(range(len(days)))
-                x_labels = [d.strftime('%d %b') for d in days]
-                visitor_data = [visitor_counts[d] for d in days]
-                borrow_data = [borrow_counts[d] for d in days]
-                xlabel = 'Tanggal'
-            elif gran == 'month':
-                months = mk_month_iter(start, end)
-                visitor_counts = {m:0 for m in months}
-                borrow_counts = {m:0 for m in months}
-                for dt in dates_vis:
-                    key = (dt.year, dt.month)
-                    if key in visitor_counts:
-                        visitor_counts[key] += 1
-                for dt in dates_bor:
-                    key = (dt.year, dt.month)
-                    if key in borrow_counts:
-                        borrow_counts[key] += 1
-                x_positions = list(range(len(months)))
-                x_labels = [f"{m[1]:02d}/{m[0]}" for m in months]
-                visitor_data = [visitor_counts[m] for m in months]
-                borrow_data = [borrow_counts[m] for m in months]
-                xlabel = 'Bulan'
-            else:
-                years = mk_year_iter(start, end)
-                visitor_counts = {y:0 for y in years}
-                borrow_counts = {y:0 for y in years}
-                for dt in dates_vis:
-                    key = dt.year
-                    if key in visitor_counts:
-                        visitor_counts[key] += 1
-                for dt in dates_bor:
-                    key = dt.year
-                    if key in borrow_counts:
-                        borrow_counts[key] += 1
-                x_positions = list(range(len(years)))
-                x_labels = [str(y) for y in years]
-                visitor_data = [visitor_counts[y] for y in years]
-                borrow_data = [borrow_counts[y] for y in years]
-                xlabel = 'Tahun'
+        x_positions = list(range(len(days)))
+        x_labels = [day.strftime('%d %b %Y') for day in days]
+        visitor_data = [visitor_counts[day] for day in days]
+        borrow_data = [borrow_counts[day] for day in days]
+        xlabel = 'Tanggal'
 
         # Plot with elegant colors
         self.ax.plot(x_positions, visitor_data,
@@ -3799,7 +3859,7 @@ class LineChart(QtWidgets.QWidget):
 
         # X ticks and labels
         self.ax.set_xticks(x_positions)
-        # avoid overcrowding labels: show max ~12 labels
+        # Keep date labels readable on longer daily timelines.
         if len(x_labels) > 12:
             step = max(1, len(x_labels) // 12)
             display_labels = ['' if (i % step) else lab for i, lab in enumerate(x_labels)]
@@ -4195,19 +4255,135 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
         for table in self.findChildren(QtWidgets.QTableWidget):
             table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
             table.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
-
-        if self.fingerprint:
-            if self.fingerprint.connect():
-                self.fingerprint.load_fingerprints_from_db(self.db)
-                if hasattr(self, 'device_status_label'):
-                    self.device_status_label.setText("ZKTeco Fingerprint Reader: Connected")
-                    self.device_status_label.setStyleSheet("color: green; font-weight: bold; padding: 5px;")
-                print("[APP] Fingerprint scanner aktif")
+            table.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
+            table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            header = table.horizontalHeader()
+            if table is getattr(self, "sale_products_table", None):
+                header.setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
+                header.setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+                table.setColumnWidth(0, 50)
+                table.setColumnWidth(2, 140)
+                table.setColumnWidth(3, 70)
+                table.setColumnWidth(4, 110)
+                table.setColumnWidth(5, 120)
             else:
-                if hasattr(self, 'device_status_label'):
-                    self.device_status_label.setText("ZKTeco Fingerprint Reader: Tidak terhubung")
-                    self.device_status_label.setStyleSheet("color: #b45309; font-weight: bold; padding: 5px;")
-                print("[APP] Fingerprint scanner tidak terhubung; aplikasi tetap berjalan")
+                header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+            header.setStretchLastSection(False)
+            header.setMinimumSectionSize(48)
+            header.setMinimumHeight(34)
+        for tab_widget in self.findChildren(QtWidgets.QTabWidget):
+            tab_widget.setUsesScrollButtons(True)
+            tab_widget.tabBar().setElideMode(Qt.ElideNone)
+
+        self._connect_fingerprint_device()
+        self.fingerprint_reconnect_timer = QtCore.QTimer(self)
+        self.fingerprint_reconnect_timer.setInterval(3000)
+        self.fingerprint_reconnect_timer.timeout.connect(self._retry_fingerprint_connection)
+        self.fingerprint_reconnect_timer.start()
+
+        self._last_dashboard_chart_refresh = time.monotonic()
+        self.dashboard_refresh_timer = QtCore.QTimer(self)
+        self.dashboard_refresh_timer.setInterval(5000)
+        self.dashboard_refresh_timer.timeout.connect(self._refresh_dashboard_periodically)
+        self.dashboard_refresh_timer.start()
+        if self.tabs:
+            self.tabs.currentChanged.connect(self._on_main_tab_changed)
+
+    def cleanup_resources(self):
+        """Hentikan semua timer, thread, scanner hardware, dan filter event untuk mencegah crash saat logout/tutup."""
+        try:
+            if hasattr(self, "fingerprint_reconnect_timer") and self.fingerprint_reconnect_timer.isActive():
+                self.fingerprint_reconnect_timer.stop()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "dashboard_refresh_timer") and self.dashboard_refresh_timer.isActive():
+                self.dashboard_refresh_timer.stop()
+        except Exception:
+            pass
+        try:
+            scan_thread = getattr(self, "_fingerprint_scan_thread", None)
+            if scan_thread and scan_thread.isRunning():
+                scan_thread.cancel()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "scanner") and self.scanner and self.scanner.isRunning():
+                self.scanner.stop()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "text_scale_controller") and self.text_scale_controller:
+                self.text_scale_controller.cleanup()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "fingerprint") and self.fingerprint:
+                self.fingerprint.disconnect()
+        except Exception:
+            pass
+
+    def closeEvent(self, event):
+        self.cleanup_resources()
+        super().closeEvent(event)
+
+    def _on_main_tab_changed(self, tab_index):
+        if self.tabs and self.tabs.tabText(tab_index) == "Dashboard":
+            self.refresh_dashboard()
+            self._last_dashboard_chart_refresh = time.monotonic()
+
+    def _refresh_dashboard_periodically(self):
+        if not self.tabs or self.tabs.tabText(self.tabs.currentIndex()) != "Dashboard":
+            return
+
+        refresh_chart = time.monotonic() - self._last_dashboard_chart_refresh >= 30
+        self.refresh_dashboard(refresh_chart=refresh_chart, refresh_pending=False)
+        if refresh_chart:
+            self._last_dashboard_chart_refresh = time.monotonic()
+
+    def _update_fingerprint_status(self, connected):
+        if not hasattr(self, "device_status_label"):
+            return
+        if connected:
+            self.device_status_label.setText("ZKTeco Fingerprint Reader: Connected")
+            self.device_status_label.setStyleSheet(
+                "color: green; font-weight: bold; padding: 5px;"
+            )
+            self.device_status_label.setToolTip("")
+        else:
+            if not self.fingerprint:
+                status = "ZKTeco Fingerprint Reader: SDK tidak tersedia"
+                error = "Modul fingerprint ZKTeco tidak tersedia."
+            else:
+                status = "ZKTeco Fingerprint Reader: Tidak terhubung; mencoba ulang..."
+                error = self.fingerprint.get_last_error() or "Perangkat belum terhubung."
+            self.device_status_label.setText(status)
+            self.device_status_label.setStyleSheet(
+                "color: #b45309; font-weight: bold; padding: 5px;"
+            )
+            self.device_status_label.setToolTip(error)
+
+    def _connect_fingerprint_device(self):
+        if not self.fingerprint:
+            self._update_fingerprint_status(False)
+            return False
+        if not self.fingerprint.connect():
+            self._update_fingerprint_status(False)
+            return False
+
+        try:
+            loaded = self.fingerprint.load_fingerprints_from_db(self.db)
+            print(f"[APP] Fingerprint scanner aktif ({loaded} template dimuat)")
+        except Exception as error:
+            print(f"[APP] Gagal memuat template fingerprint: {error}")
+        self._update_fingerprint_status(True)
+        return True
+
+    def _retry_fingerprint_connection(self):
+        if self.fingerprint and self.fingerprint.is_connected():
+            self._update_fingerprint_status(True)
+            return
+        self._connect_fingerprint_device()
 
     # -------------------- UI --------------------------
 
@@ -4527,6 +4703,8 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
 
         # Visitor table
         self.vis_table = QtWidgets.QTableWidget()
+        self.vis_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.vis_table.customContextMenuRequested.connect(self.show_visitor_visit_context_menu)
         v_vis.addWidget(self.vis_table)
         
         # Statistics section
@@ -5095,7 +5273,7 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
         
         return {'widget': card, 'label': value_label}
     
-    def refresh_dashboard(self):
+    def refresh_dashboard(self, refresh_chart=True, refresh_pending=True):
         self.lbl_books.setText(str(self.db.count_books()))
         self.lbl_members.setText(str(self.db.count_members()))
         self.lbl_borrows.setText(str(self.db.count_active_borrows()))
@@ -5103,15 +5281,15 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
         
         # Update device status indicator
         if hasattr(self, 'device_status_label'):
-            # USB scanner always ready
-            self.device_status_label.setText(" USB Fingerprint Scanner: Ready")
-            self.device_status_label.setStyleSheet("color: green; font-weight: bold; padding: 5px;")
+            self._update_fingerprint_status(
+                bool(self.fingerprint and self.fingerprint.is_connected())
+            )
         
         # Refresh pending QR codes list (if UI initialized)
-        if hasattr(self, 'pending_qr_table'):
+        if refresh_pending and hasattr(self, 'pending_qr_table'):
             self.load_pending_qr_codes()
         
-        if self.chart:
+        if refresh_chart and self.chart:
             self.chart.refresh()
 
     def _make_stat_card_clickable(self, card, tab_index):
@@ -5283,12 +5461,12 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
         menu.addSeparator()
         
         action_logout = menu.addAction(" Logout")
-        action_logout.triggered.connect(self.perform_logout)
         
         # Position menu di bawah avatar button
         pos = self.avatar_button.mapToGlobal(QtCore.QPoint(0, self.avatar_button.height()))
-        menu.popup(pos)
-        menu.exec_(pos)
+        selected_action = menu.exec_(pos)
+        if selected_action == action_logout:
+            QtCore.QTimer.singleShot(0, self.perform_logout)
 
     def _create_librarian_qr_image(self, user):
         """Create a standalone QR image for the signed-in librarian."""
@@ -5628,28 +5806,30 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
         AuthWindow and close this MainWindow instance so the auth flow can create
         a new MainWindow after successful login/register.
         """
+        self.cleanup_resources()
+
         try:
             central = QtWidgets.QWidget()
             central.setObjectName("goodbyeContainer")
             layout = QtWidgets.QVBoxLayout(central)
-            layout.setContentsMargins(40, 40, 40, 40)
+            layout.setContentsMargins(16, 16, 16, 16)
             layout.setAlignment(Qt.AlignCenter)
 
             panel = QtWidgets.QFrame()
             panel.setObjectName("goodbyePanel")
+            panel.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
+            panel.setMaximumWidth(720)
             panel.setStyleSheet("""
                 QFrame#goodbyePanel {
                     background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
                         stop:0 #ffffff, stop:1 #f5f9ff);
                     border: 1px solid #dce7f2;
                     border-radius: 20px;
-                    padding: 24px;
                 }
             """)
-            panel.setMinimumWidth(520)
             panel_layout = QtWidgets.QVBoxLayout(panel)
-            panel_layout.setSpacing(14)
-            panel_layout.setContentsMargins(28, 28, 28, 28)
+            panel_layout.setSpacing(12)
+            panel_layout.setContentsMargins(20, 20, 20, 20)
             panel_layout.setAlignment(Qt.AlignCenter)
 
             # Logo on goodbye page
@@ -5670,10 +5850,10 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
             big.setAlignment(Qt.AlignCenter)
             big.setWordWrap(True)
             big.setStyleSheet("""
-                font-size: 24px;
+                font-size: 22px;
                 font-weight: 700;
                 color: #243447;
-                margin-top: 8px;
+                margin-top: 4px;
             """)
             panel_layout.addWidget(big)
 
@@ -5681,23 +5861,23 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
             subtitle.setAlignment(Qt.AlignCenter)
             subtitle.setWordWrap(True)
             subtitle.setStyleSheet("""
-                font-size: 14px;
+                font-size: 13px;
                 color: #6b7785;
-                margin-bottom: 8px;
             """)
             panel_layout.addWidget(subtitle)
 
             btn_link = QtWidgets.QPushButton("Kembali ke Daftar / Login")
             btn_link.setObjectName("secondaryButton")
             btn_link.setCursor(Qt.PointingHandCursor)
-            btn_link.setMinimumHeight(42)
+            btn_link.setMinimumSize(280, 44)
+            btn_link.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
             btn_link.setStyleSheet("""
                 QPushButton#secondaryButton {
                     background-color: #ffffff;
                     color: #2a6fde;
                     border: 1px solid #2a6fde;
                     border-radius: 999px;
-                    padding: 10px 20px;
+                    padding: 8px 12px;
                     font-size: 13px;
                     font-weight: 600;
                 }
@@ -5707,12 +5887,15 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
             """)
             panel_layout.addWidget(btn_link, alignment=Qt.AlignCenter)
 
-            # When clicked, open the AuthWindow and close this window so auth creates a new MainWindow
             def _open_auth():
                 try:
+                    self.cleanup_resources()
                     auth = AuthWindow(self.db, start_page='login')
+                    app = QtWidgets.QApplication.instance()
+                    if app is None:
+                        raise RuntimeError("Aplikasi Qt tidak tersedia.")
+                    app._active_window = auth
                     auth.show()
-                    # Close this main window instance
                     self.close()
                 except Exception as e:
                     QtWidgets.QMessageBox.critical(self, "Error", f"Gagal membuka halaman autentikasi: {e}")
@@ -5974,6 +6157,7 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
     def load_books(self):
         """Menampilkan seluruh data buku di tabel dan populate filter kategori"""
         rows = self.db.list_books()
+        self.books_table.setUpdatesEnabled(False)
         self.books_table.setRowCount(len(rows))
         self.books_table.setColumnCount(10)
         self.books_table.setHorizontalHeaderLabels(
@@ -5982,14 +6166,16 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
         for r, row in enumerate(rows):
             for c, v in enumerate(row):
                 self.books_table.setItem(r, c, QtWidgets.QTableWidgetItem(str(v)))
+        self.books_table.setUpdatesEnabled(True)
         self.books_table.resizeColumnsToContents()
         
         # Populate filter kategori dropdown
-        self.update_kategori_filter()
+        self.update_kategori_filter(rows)
 
-    def update_kategori_filter(self):
+    def update_kategori_filter(self, rows=None):
         """Update filter kategori dengan data unik dari database"""
-        rows = self.db.list_books()
+        if rows is None:
+            rows = self.db.list_books()
         
         # Dapatkan kategori unik
         kategori_list = set()
@@ -6224,14 +6410,19 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
         def on_cancel():
             dialog.reject()
         
+        btn_ok.setAutoDefault(True)
+        btn_ok.setDefault(True)
+        btn_cancel.setAutoDefault(False)
         btn_ok.clicked.connect(on_ok)
         btn_cancel.clicked.connect(on_cancel)
+        barcode_input.returnPressed.connect(on_ok)
         
         # Set focus ke input field agar scanner bisa langsung input
         barcode_input.setFocus()
+        QtCore.QTimer.singleShot(0, barcode_input.setFocus)
         self.status.showMessage(f" Scanning barcode untuk buku '{book_judul}' - arahkan scanner ke barcode...")
         
-        dialog.exec()
+        dialog.exec_()
 
     def handle_book_barcode_scan(self, barcode):
         """Hasil scan barcode buku disimpan ke database"""
@@ -6262,13 +6453,24 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
     # -------------------- PENJUALAN BAZAR ---------------------
     def load_sale_products(self):
         rows = self.db.list_sale_products()
+        self.sale_products_table.setUpdatesEnabled(False)
         self.sale_products_table.setRowCount(len(rows))
         for row_index, row in enumerate(rows):
             product_id, title, author, price, barcode, stock = row
-            values = [str(product_id), title, author, f"Rp {price:,.0f}", barcode or "-", str(stock)]
+            values = [
+                str(row_index + 1),
+                title,
+                barcode or "-",
+                str(stock),
+                f"Rp {price:,.0f}",
+                f"Rp {price * stock:,.0f}",
+            ]
             for column_index, value in enumerate(values):
-                self.sale_products_table.setItem(row_index, column_index, QtWidgets.QTableWidgetItem(value))
-        self.sale_products_table.resizeColumnsToContents()
+                item = QtWidgets.QTableWidgetItem(value)
+                if column_index == 0:
+                    item.setData(QtCore.Qt.UserRole, product_id)
+                self.sale_products_table.setItem(row_index, column_index, item)
+        self.sale_products_table.setUpdatesEnabled(True)
 
     def import_sale_products_from_excel(self):
         try:
@@ -6278,174 +6480,370 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
             return
 
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Import Buku Bazar", "", "Excel/CSV Files (*.xlsx *.xls *.csv)"
+            self, "Import Buku Bazar", "", "Excel Files (*.xlsx *.xls)"
         )
         if not path:
             return
 
         try:
-            df = pd.read_csv(path) if path.lower().endswith(".csv") else pd.read_excel(path)
-            columns = {str(column).strip().lower(): column for column in df.columns}
+            if not path.lower().endswith((".xlsx", ".xls")):
+                raise ValueError("Import produk penjualan hanya mendukung file Excel (.xlsx atau .xls).")
 
-            def value(row, *names):
-                for name in names:
-                    if name in columns and pd.notna(row[columns[name]]):
-                        return str(row[columns[name]]).strip()
-                return ""
+            def normalize_header(value):
+                return "".join(char for char in str(value).strip().lower() if char.isalnum())
 
-            required = {
-                "judul": ("judul", "title"),
-                "penulis": ("penulis", "author", "pengarang"),
-                "harga": ("harga", "price")
-            }
-            missing = [label for label, names in required.items() if not any(name in columns for name in names)]
-            if missing:
-                raise ValueError("Kolom wajib tidak ditemukan: " + ", ".join(missing) + ". Minimal: judul, penulis, harga.")
+            def cell_value(row, column):
+                if column is None or column >= len(row) or pd.isna(row.iloc[column]):
+                    return ""
+                return str(row.iloc[column]).strip()
+
+            title_names = {"judul", "title"}
+            author_names = {"penulis", "author", "pengarang"}
+            price_names = {"harga", "price"}
+            stock_names = {"stok", "stock", "jumlah", "jml", "qty", "quantity"}
+            barcode_names = {"barcode", "barcodenumber", "kodebarcode"}
+
+            df = pd.read_excel(path, header=None)
+            title_column = price_column = author_column = stock_column = barcode_column = header_row = None
+            for row_index, row in df.iterrows():
+                headers = [normalize_header(value) if pd.notna(value) else "" for value in row]
+                found_title = next((index for index, name in enumerate(headers) if name in title_names), None)
+                found_price = next((index for index, name in enumerate(headers) if name in price_names), None)
+                if found_title is None or found_price is None:
+                    continue
+
+                header_row = row_index
+                title_column = found_title
+                price_column = found_price
+                author_column = next((index for index, name in enumerate(headers) if name in author_names), None)
+                stock_column = next((index for index, name in enumerate(headers) if name in stock_names), None)
+                barcode_column = next((index for index, name in enumerate(headers) if name in barcode_names), None)
+
+                if row_index + 1 < len(df):
+                    subheaders = [
+                        normalize_header(value) if pd.notna(value) else ""
+                        for value in df.iloc[row_index + 1]
+                    ]
+                    exhibition_price = next(
+                        (index for index, name in enumerate(subheaders) if name in {"pameran", "hargapameran"}),
+                        None
+                    )
+                    if exhibition_price is not None:
+                        price_column = exhibition_price
+                break
+            data_rows = (
+                (row, row_index + 1)
+                for row_index, row in df.iterrows()
+                if header_row is not None and row_index > header_row
+            )
+
+            if title_column is None or price_column is None:
+                raise ValueError("Kolom wajib tidak ditemukan. Pastikan file memiliki kolom judul dan harga.")
 
             cursor = self.db.conn.cursor()
             inserted = 0
             skipped = 0
-            for _, row in df.iterrows():
-                title = value(row, "judul", "title")
-                author = value(row, "penulis", "author", "pengarang")
-                if not title or not author:
+            barcode_conflicts = 0
+            ambiguous_titles = 0
+            for row, row_number in data_rows:
+                title = cell_value(row, title_column)
+                if not title:
                     skipped += 1
                     continue
-                price_text = value(row, "harga", "price").replace("Rp", "").replace("rp", "").replace(".", "").replace(",", ".").strip()
-                price = float(price_text)
-                stock_text = value(row, "stok", "stock", "jumlah") or "1"
-                stock = int(float(stock_text.replace(",", ".")))
-                cursor.execute("SELECT id FROM sale_products WHERE judul=? AND penulis=?", (title, author))
-                if cursor.fetchone():
+                title = title.replace("\u200b", "").strip()
+                if not title or title.lower().startswith(("jumlah", "diskon", "bruto", "penerima", "administrasi", "gudang", "total")):
                     skipped += 1
                     continue
+
+                author = cell_value(row, author_column) or "Umum"
+                barcode = cell_value(row, barcode_column)
+                if barcode.endswith(".0") and barcode[:-2].isdigit():
+                    barcode = barcode[:-2]
+                barcode = barcode or None
+                price_text = cell_value(row, price_column)
+                if not price_text:
+                    skipped += 1
+                    continue
+                try:
+                    if isinstance(row.iloc[price_column], (int, float)):
+                        price = float(row.iloc[price_column])
+                    else:
+                        price_text = price_text.replace("Rp", "").replace("rp", "").replace(" ", "")
+                        price = float(price_text.replace(".", "").replace(",", "."))
+                except (TypeError, ValueError):
+                    skipped += 1
+                    continue
+
+                stock_text = cell_value(row, stock_column) or "1"
+                try:
+                    stock = int(float(stock_text.replace(",", ".")))
+                except (TypeError, ValueError):
+                    skipped += 1
+                    continue
+
                 cursor.execute(
-                    "INSERT INTO sale_products(judul, penulis, harga, stok, created_at) VALUES(?,?,?,?,?)",
-                    (title, author, price, stock, datetime.now().isoformat())
+                    "SELECT id, barcode FROM sale_products WHERE judul=? ORDER BY id",
+                    (title,)
+                )
+                existing_products = cursor.fetchall()
+                if len(existing_products) > 1:
+                    if barcode:
+                        ambiguous_titles += 1
+                    skipped += 1
+                    continue
+                existing_product = existing_products[0] if existing_products else None
+                if existing_product:
+                    product_id, existing_barcode = existing_product
+                    if barcode and not existing_barcode:
+                        cursor.execute("SELECT id FROM sale_products WHERE barcode=?", (barcode,))
+                        barcode_owner = cursor.fetchone()
+                        if not barcode_owner or barcode_owner[0] == product_id:
+                            cursor.execute(
+                                "UPDATE sale_products SET barcode=? WHERE id=?",
+                                (barcode, product_id)
+                            )
+                        else:
+                            barcode_conflicts += 1
+                    elif barcode and existing_barcode != barcode:
+                        barcode_conflicts += 1
+                    skipped += 1
+                    continue
+
+                if barcode:
+                    cursor.execute("SELECT id FROM sale_products WHERE barcode=?", (barcode,))
+                    if cursor.fetchone():
+                        barcode_conflicts += 1
+                        barcode = None
+
+                cursor.execute(
+                    "INSERT INTO sale_products(judul, penulis, harga, barcode, stok, created_at) VALUES(?,?,?,?,?,?)",
+                    (title, author, price, barcode, stock, datetime.now().isoformat())
                 )
                 inserted += 1
             self.db.conn.commit()
             self.load_sale_products()
-            QtWidgets.QMessageBox.information(self, "Import Berhasil", f"{inserted} buku bazar ditambahkan.\n{skipped} baris dilewati.")
+            message = f"{inserted} buku bazar ditambahkan.\n{skipped} baris dilewati."
+            if barcode_conflicts:
+                message += f"\n{barcode_conflicts} barcode tidak diubah karena sudah digunakan atau berbeda dengan data yang tersimpan."
+            if ambiguous_titles:
+                message += f"\n{ambiguous_titles} barcode tidak diimpor karena judul cocok dengan lebih dari satu produk."
+            QtWidgets.QMessageBox.information(self, "Import Berhasil", message)
         except Exception as error:
             self.db.conn.rollback()
             QtWidgets.QMessageBox.critical(self, "Import Gagal", str(error))
 
-    def scan_sale_product_barcode(self):
-        row = self.sale_products_table.currentRow()
-        if row < 0:
-            QtWidgets.QMessageBox.warning(self, "Pilih Buku", "Pilih buku bazar yang akan diisi barcodenya.")
-            return
-        product_id = int(self.sale_products_table.item(row, 0).text())
-        title = self.sale_products_table.item(row, 1).text()
-        dialog = QtWidgets.QDialog(self)
-        dialog.setWindowTitle("Scan Barcode Buku Bazar")
-        layout = QtWidgets.QVBoxLayout(dialog)
-        layout.addWidget(QtWidgets.QLabel(f"Buku: {title}\nArahkan scanner barcode batang ke buku."))
-        barcode_input = QtWidgets.QLineEdit()
-        barcode_input.setPlaceholderText("Hasil scan barcode buku")
-        layout.addWidget(barcode_input)
-        buttons = QtWidgets.QHBoxLayout()
-        save_button = QtWidgets.QPushButton("Simpan Barcode")
-        cancel_button = QtWidgets.QPushButton("Batal")
-        buttons.addWidget(save_button)
-        buttons.addWidget(cancel_button)
-        layout.addLayout(buttons)
-
-        def save():
-            barcode = barcode_input.text().strip()
-            if not barcode:
-                QtWidgets.QMessageBox.warning(dialog, "Validasi", "Barcode belum terbaca.")
-                return
-            try:
-                self.db.add_sale_product_barcode(product_id, barcode)
-                dialog.accept()
-                self.load_sale_products()
-            except Exception as error:
-                QtWidgets.QMessageBox.critical(dialog, "Gagal", str(error))
-
-        save_button.clicked.connect(save)
-        barcode_input.returnPressed.connect(save)
-        cancel_button.clicked.connect(dialog.reject)
-        barcode_input.setFocus()
-        dialog.exec_()
-
     def open_sales_cashier(self):
         dialog = QtWidgets.QDialog(self)
         dialog.setWindowTitle("Kasir Bazar")
-        dialog.resize(700, 500)
+        dialog.resize(780, 530)
+
+        # Mencegah penutupan pop up kasir secara tidak sengaja ketika menekan Escape
+        def on_dialog_key_press(event):
+            if event.key() == Qt.Key_Escape:
+                event.ignore()
+                return
+            QtWidgets.QDialog.keyPressEvent(dialog, event)
+        dialog.keyPressEvent = on_dialog_key_press
+
         layout = QtWidgets.QVBoxLayout(dialog)
-        layout.addWidget(QtWidgets.QLabel("Scan barcode batang buku untuk memasukkan barang ke keranjang."))
+        layout.setSpacing(10)
+        layout.addWidget(QtWidgets.QLabel(
+            "Scan barcode buku. Setiap scan akan meminta konfirmasi sebelum transaksi disimpan."
+        ))
+
+        # Status label untuk feedback langsung tanpa blocking pop up yang mengganggu kasir
+        status_label = QtWidgets.QLabel("Siap menerima scan barcode buku.")
+        status_label.setStyleSheet("color: #475569; font-size: 13px; padding: 4px 0px;")
+        status_label.setWordWrap(True)
+        layout.addWidget(status_label)
+
         barcode_input = QtWidgets.QLineEdit()
-        barcode_input.setPlaceholderText("Scan barcode buku")
+        barcode_input.setPlaceholderText("Arahkan scanner ke barcode buku di sini...")
+        barcode_input.setFont(QtGui.QFont("Arial", 12))
         layout.addWidget(barcode_input)
-        cart_table = QtWidgets.QTableWidget(0, 4)
-        cart_table.setHorizontalHeaderLabels(["Buku", "Harga", "Jumlah", "Subtotal"])
-        layout.addWidget(cart_table)
-        total_label = QtWidgets.QLabel("Total: Rp 0")
-        total_label.setStyleSheet("font-size: 16px; font-weight: bold;")
+
+        session_table = QtWidgets.QTableWidget(0, 4)
+        session_table.setHorizontalHeaderLabels(
+            ["Waktu", "Judul Buku", "Harga Asli", "Harga Jual"]
+        )
+        session_table.horizontalHeader().setSectionResizeMode(
+            1, QtWidgets.QHeaderView.Stretch
+        )
+        layout.addWidget(session_table)
+
+        total_label = QtWidgets.QLabel("Total transaksi tersimpan: Rp 0")
+        total_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #1e293b;")
         layout.addWidget(total_label)
+
         buttons = QtWidgets.QHBoxLayout()
-        checkout_button = QtWidgets.QPushButton("Selesaikan Penjualan")
-        close_button = QtWidgets.QPushButton("Tutup")
-        buttons.addWidget(checkout_button)
+        close_button = QtWidgets.QPushButton("Selesaikan Penjualan")
+        # Pastikan close_button BUKAN default button agar tidak terpencet saat scan/Enter
+        close_button.setAutoDefault(False)
+        close_button.setDefault(False)
+        close_button.setCursor(Qt.PointingHandCursor)
         buttons.addWidget(close_button)
         layout.addLayout(buttons)
-        cart = {}
 
-        def refresh_cart():
-            cart_table.setRowCount(len(cart))
-            total = 0
-            for index, item in enumerate(cart.values()):
-                subtotal = item["price"] * item["quantity"]
-                total += subtotal
-                values = [item["title"], f"Rp {item['price']:,.0f}", str(item["quantity"]), f"Rp {subtotal:,.0f}"]
-                for column, value in enumerate(values):
-                    cart_table.setItem(index, column, QtWidgets.QTableWidgetItem(value))
-            total_label.setText(f"Total: Rp {total:,.0f}")
-            return total
+        session_total = 0
+        saved_count = 0
+        is_processing = False
+
+        def refocus_input():
+            barcode_input.clear()
+            barcode_input.setFocus()
 
         def add_scanned_product():
+            nonlocal session_total, saved_count, is_processing
+            if is_processing:
+                return
+
             barcode = barcode_input.text().strip()
+            if not barcode:
+                refocus_input()
+                return
+
+            is_processing = True
             barcode_input.clear()
+
             product = self.db.find_sale_product_by_barcode(barcode)
             if not product:
-                QtWidgets.QMessageBox.warning(dialog, "Tidak Ditemukan", "Barcode belum terdaftar di inventaris bazar.")
+                status_label.setText(f"⚠ Barcode '{barcode}' belum terdaftar di inventaris bazar.")
+                status_label.setStyleSheet("color: #b91c1c; font-size: 13px; font-weight: bold; background-color: #fee2e2; border: 1px solid #fca5a5; border-radius: 6px; padding: 6px 10px;")
+                QtWidgets.QMessageBox.warning(dialog, "Tidak Ditemukan", f"Barcode '{barcode}' belum terdaftar di inventaris bazar.")
+                is_processing = False
+                QtCore.QTimer.singleShot(0, refocus_input)
                 return
-            product_id, title, author, price, saved_barcode, stock = product
-            current_quantity = cart.get(product_id, {}).get("quantity", 0)
-            if stock <= current_quantity:
-                QtWidgets.QMessageBox.warning(dialog, "Stok Habis", f"Stok {title} tidak mencukupi.")
-                return
-            cart[product_id] = {"title": title, "price": price, "quantity": current_quantity + 1}
-            refresh_cart()
 
-        def checkout():
-            if not cart:
-                QtWidgets.QMessageBox.warning(dialog, "Keranjang Kosong", "Scan buku terlebih dahulu.")
+            product_id, title, author, price, saved_barcode, stock = product
+            if stock <= 0:
+                status_label.setText(f"⚠ Stok '{title}' habis.")
+                status_label.setStyleSheet("color: #b91c1c; font-size: 13px; font-weight: bold; background-color: #fee2e2; border: 1px solid #fca5a5; border-radius: 6px; padding: 6px 10px;")
+                QtWidgets.QMessageBox.warning(dialog, "Stok Habis", f"Stok {title} tidak mencukupi.")
+                is_processing = False
+                QtCore.QTimer.singleShot(0, refocus_input)
                 return
-            total = refresh_cart()
+
+            sale_price = price + 5000
+
+            confirmation = QtWidgets.QMessageBox(dialog)
+            confirmation.setWindowTitle("Konfirmasi Transaksi")
+            confirmation.setIcon(QtWidgets.QMessageBox.Question)
+            confirmation.setWindowModality(Qt.WindowModal)
+            confirmation.setText(
+                f"Judul buku: {title}\n"
+                f"Harga asli: Rp {price:,.0f}\n"
+                f"Harga jual: Rp {sale_price:,.0f}\n\n"
+                "Simpan transaksi ini?"
+            )
+            save_button = confirmation.addButton(
+                "Simpan Transaksi", QtWidgets.QMessageBox.AcceptRole
+            )
+            cancel_button = confirmation.addButton("Batal", QtWidgets.QMessageBox.RejectRole)
+            confirmation.setDefaultButton(save_button)
+            confirmation.exec_()
+
+            if confirmation.clickedButton() != save_button:
+                # Transaksi batal: hanya pop up konfirmasi yang ditutup, pop up buka kasir tetap terbuka
+                status_label.setText(f"Transaksi untuk '{title}' dibatalkan. Siap scan buku berikutnya.")
+                status_label.setStyleSheet("color: #b45309; font-size: 13px; font-weight: 500; background-color: #fef3c7; border: 1px solid #fde68a; border-radius: 6px; padding: 6px 10px;")
+                is_processing = False
+                QtCore.QTimer.singleShot(0, refocus_input)
+                return
+
             cursor = self.db.conn.cursor()
             try:
-                cursor.execute("INSERT INTO sales(total, created_at, dibuat_oleh) VALUES(?,?,?)", (total, datetime.now().isoformat(), self.current_user.get("username") if self.current_user else "Sistem"))
+                cursor.execute(
+                    "SELECT judul, harga, stok FROM sale_products WHERE id=? AND barcode=?",
+                    (product_id, barcode),
+                )
+                current_product = cursor.fetchone()
+                if not current_product:
+                    raise ValueError("Produk berubah atau tidak lagi terdaftar. Silakan scan ulang.")
+                current_title, current_price, current_stock = current_product
+                if current_stock <= 0:
+                    raise ValueError(f"Stok {current_title} sudah habis.")
+                if current_title != title or current_price != price:
+                    raise ValueError(
+                        "Data produk berubah setelah konfirmasi dibuka. Silakan scan ulang."
+                    )
+
+                cursor.execute(
+                    "UPDATE sale_products SET stok=stok-1 WHERE id=? AND barcode=? AND stok>0",
+                    (product_id, barcode),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError(f"Stok {title} sudah habis.")
+
+                cursor.execute(
+                    "INSERT INTO sales(total, created_at, dibuat_oleh) VALUES(?,?,?)",
+                    (
+                        sale_price,
+                        datetime.now().isoformat(),
+                        self.current_user.get("username") if self.current_user else "Sistem",
+                    ),
+                )
                 sale_id = cursor.lastrowid
-                for product_id, item in cart.items():
-                    cursor.execute("INSERT INTO sale_items(sale_id, product_id, jumlah, harga) VALUES(?,?,?,?)", (sale_id, product_id, item["quantity"], item["price"]))
-                    cursor.execute("UPDATE sale_products SET stok=stok-? WHERE id=?", (item["quantity"], product_id))
+                cursor.execute(
+                    "INSERT INTO sale_items(sale_id, product_id, jumlah, harga, harga_asli) "
+                    "VALUES(?,?,?,?,?)",
+                    (sale_id, product_id, 1, sale_price, price),
+                )
                 self.db.conn.commit()
-                QtWidgets.QMessageBox.information(dialog, "Penjualan Berhasil", f"Total penjualan: Rp {total:,.0f}")
-                cart.clear()
-                refresh_cart()
-                self.load_sale_products()
+
+                session_total += sale_price
+                saved_count += 1
+                row_index = session_table.rowCount()
+                session_table.insertRow(row_index)
+                values = [
+                    datetime.now().strftime("%H:%M:%S"),
+                    title,
+                    f"Rp {price:,.0f}",
+                    f"Rp {sale_price:,.0f}",
+                ]
+                for column, value in enumerate(values):
+                    session_table.setItem(
+                        row_index, column, QtWidgets.QTableWidgetItem(value)
+                    )
+                session_table.scrollToBottom()
+                total_label.setText(
+                    f"Total transaksi tersimpan: Rp {session_total:,.0f}"
+                )
+
+                # Feedback instan di jendela kasir tanpa pop up blocking yang menghentikan ritme scan
+                status_label.setText(
+                    f"✓ Transaksi '{title}' (Harga Jual: Rp {sale_price:,.0f}) BERHASIL DISIMPAN! Siap scan berikutnya."
+                )
+                status_label.setStyleSheet("color: #15803d; font-size: 13px; font-weight: bold; background-color: #dcfce7; border: 1px solid #86efac; border-radius: 6px; padding: 6px 10px;")
             except Exception as error:
                 self.db.conn.rollback()
+                status_label.setText(f"❌ Gagal menyimpan transaksi: {error}")
+                status_label.setStyleSheet("color: #b91c1c; font-size: 13px; font-weight: bold; background-color: #fee2e2; border: 1px solid #fca5a5; border-radius: 6px; padding: 6px 10px;")
                 QtWidgets.QMessageBox.critical(dialog, "Gagal Menyimpan", str(error))
+            finally:
+                is_processing = False
+                QtCore.QTimer.singleShot(0, refocus_input)
 
         barcode_input.returnPressed.connect(add_scanned_product)
-        checkout_button.clicked.connect(checkout)
-        close_button.clicked.connect(dialog.accept)
-        barcode_input.setFocus()
+
+        def close_cashier():
+            dialog.hide()
+            dialog.accept()
+
+        close_button.clicked.connect(close_cashier)
+
+        def on_dialog_close(event):
+            dialog.hide()
+            event.accept()
+
+        dialog.closeEvent = on_dialog_close
+
+        QtCore.QTimer.singleShot(0, refocus_input)
         dialog.exec_()
+
+        # Update tabel data penjualan utama setelah jendela kasir ditutup
+        # Hanya jika ada transaksi yang disimpan selama kasir dibuka
+        if saved_count > 0:
+            QtCore.QTimer.singleShot(10, self.load_sale_products)
 
     def setup_sales_tab(self):
         tab_sales = QtWidgets.QWidget()
@@ -6453,27 +6851,37 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
         layout = QtWidgets.QVBoxLayout(tab_sales)
         actions = QtWidgets.QHBoxLayout()
         import_button = QtWidgets.QPushButton("Import Excel Buku Jual")
-        barcode_button = QtWidgets.QPushButton("Scan Barcode Buku")
         cashier_button = QtWidgets.QPushButton("Buka Kasir")
         refresh_button = QtWidgets.QPushButton("Refresh")
-        for button in (import_button, barcode_button, cashier_button, refresh_button):
+        for button in (import_button, cashier_button, refresh_button):
             button.setSizePolicy(QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Fixed)
             actions.addWidget(button)
         actions.addStretch()
         layout.addLayout(actions)
-        layout.addWidget(QtWidgets.QLabel("Excel minimal: judul, penulis, harga. Barcode diisi melalui scan barcode batang."))
+        layout.addWidget(QtWidgets.QLabel(
+            "Kolom tabel mengikuti sheet FAKTUR: No, Judul, Barcode, Stok, Harga, Total Harga."
+        ))
         self.sale_products_table = QtWidgets.QTableWidget(0, 6)
-        self.sale_products_table.setHorizontalHeaderLabels(["ID", "Judul", "Penulis", "Harga", "Barcode", "Stok"])
+        self.sale_products_table.setHorizontalHeaderLabels(
+            ["No", "Judul", "Barcode", "Stok", "Harga", "Total Harga"]
+        )
+        header = self.sale_products_table.horizontalHeader()
+        header.setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+        self.sale_products_table.setColumnWidth(0, 50)
+        self.sale_products_table.setColumnWidth(2, 140)
+        self.sale_products_table.setColumnWidth(3, 70)
+        self.sale_products_table.setColumnWidth(4, 110)
+        self.sale_products_table.setColumnWidth(5, 120)
         layout.addWidget(self.sale_products_table)
         import_button.clicked.connect(self.import_sale_products_from_excel)
-        barcode_button.clicked.connect(self.scan_sale_product_barcode)
         cashier_button.clicked.connect(self.open_sales_cashier)
         refresh_button.clicked.connect(self.load_sale_products)
         self.load_sale_products()
 
     # -------------------- ANGGOTA ---------------------
     def import_new_members_from_excel(self, refresh_callback=None):
-        """Import data santri baru tanpa membuat QR atau kartu anggota."""
+        """Import santri baru, buat QR, dan ekspor data QR ke Excel."""
         try:
             import pandas as pd
         except ImportError:
@@ -6521,6 +6929,7 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
             cursor = self.db.conn.cursor()
             inserted = 0
             skipped = 0
+            imported_members = []
             for _, row in df.iterrows():
                 nama = column_value(row, "nama", "name", "nama lengkap")
                 if not nama:
@@ -6551,21 +6960,96 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
                     "INSERT INTO members(nis, nama, rayon, kamar, alamat, barcode, jenis_santri, qr_id) VALUES(?,?,?,?,?,?,?,?)",
                     (nis, nama, rayon, kamar, alamat, barcode, "baru", qr_id)
                 )
+                imported_members.append({
+                    "nama": nama,
+                    "rayon": rayon,
+                    "kamar": kamar,
+                    "qr_id": qr_id,
+                    "barcode": barcode,
+                })
                 inserted += 1
 
             self.db.conn.commit()
+            report_path = None
+            report_error = None
+            if imported_members:
+                try:
+                    report_path = self.export_imported_members_to_excel(imported_members)
+                except Exception as e:
+                    report_error = e
+
             self.refresh_dashboard()
             if refresh_callback:
                 refresh_callback()
-            QtWidgets.QMessageBox.information(
+
+            report_message = (
+                f"\n\nFile Excel data anggota:\n{report_path}"
+                if report_path else
+                (
+                    f"\n\nData berhasil diimpor, tetapi file Excel gagal dibuat:\n{report_error}"
+                    if report_error else
+                    "\n\nTidak ada anggota baru yang berhasil diimpor, jadi file Excel tidak dibuat."
+                )
+            )
+            message_box = (
+                QtWidgets.QMessageBox.warning
+                if report_error else
+                QtWidgets.QMessageBox.information
+            )
+            message_box(
                 self, "Import Berhasil",
                 f"{inserted} data santri baru ditambahkan.\n"
                 f"{skipped} baris dilewati karena kosong atau sudah terdaftar.\n\n"
                 "QR ID, barcode, dan file QR dibuat otomatis. Santri baru dapat langsung memakai QR tersebut."
+                f"{report_message}"
             )
         except Exception as e:
             self.db.conn.rollback()
             QtWidgets.QMessageBox.critical(self, "Import Gagal", f"Data santri gagal diimpor:\n{e}")
+
+    def export_imported_members_to_excel(self, members):
+        """Buat Excel untuk anggota yang berhasil ditambahkan dari satu impor."""
+        from pathlib import Path
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Font, PatternFill
+
+        if hasattr(sys, '_MEIPASS'):
+            laporan_dir = os.path.join(str(Path.home()), "A Latee Library", "laporan")
+        else:
+            laporan_dir = "laporan"
+        os.makedirs(laporan_dir, exist_ok=True)
+
+        filename = f"Data_Anggota_QR_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.xlsx"
+        filepath = os.path.join(laporan_dir, filename)
+
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = "Anggota Baru"
+        headers = ["No", "Nama", "Rayon", "Kamar", "QR ID", "Barcode"]
+        worksheet.append(headers)
+
+        header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+        for cell in worksheet[1]:
+            cell.font = Font(color="FFFFFF", bold=True)
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center")
+
+        for number, member in enumerate(members, start=1):
+            worksheet.append([
+                number,
+                member["nama"],
+                member["rayon"],
+                member["kamar"],
+                member["qr_id"],
+                member["barcode"],
+            ])
+
+        for column, width in {"A": 8, "B": 30, "C": 20, "D": 15, "E": 38, "F": 24}.items():
+            worksheet.column_dimensions[column].width = width
+        worksheet.freeze_panes = "A2"
+        worksheet.auto_filter.ref = worksheet.dimensions
+        workbook.save(filepath)
+        return filepath
 
     def show_members_dialog(self):
         """Tampilkan dialog popup dengan tabel anggota terdaftar, filter rayon, dan pencarian"""
@@ -6728,7 +7212,7 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
         # ===== Buttons =====
         btn_layout = QtWidgets.QHBoxLayout()
         btn_import_new = QtWidgets.QPushButton("Import Excel Santri Baru")
-        btn_import_new.setToolTip("Import data tanpa membuat QR atau kartu anggota")
+        btn_import_new.setToolTip("Import data santri baru, buat QR anggota, dan ekspor hasilnya ke Excel")
         btn_import_new.setSizePolicy(QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Fixed)
         btn_import_new.clicked.connect(lambda: self.import_new_members_from_excel(load_members_dialog))
         btn_layout.addWidget(btn_import_new)
@@ -7417,6 +7901,43 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
 
 
     # -------------------- PENGUNJUNG ------------------
+    def show_visitor_visit_context_menu(self, position):
+        row = self.vis_table.rowAt(position.y())
+        if row < 0:
+            return
+
+        visit_id_item = self.vis_table.item(row, 0)
+        if not visit_id_item:
+            return
+
+        menu = QtWidgets.QMenu(self)
+        delete_action = menu.addAction("Hapus Catatan Kunjungan")
+        if menu.exec_(self.vis_table.mapToGlobal(position)) == delete_action:
+            self.delete_visitor_visit(int(visit_id_item.text()))
+
+    def delete_visitor_visit(self, visit_id):
+        confirmation = QtWidgets.QMessageBox.question(
+            self,
+            "Hapus Catatan Kunjungan",
+            "Yakin ingin menghapus catatan kunjungan ini?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No
+        )
+        if confirmation != QtWidgets.QMessageBox.Yes:
+            return
+
+        try:
+            if not self.db.delete_visitor_visit(visit_id):
+                QtWidgets.QMessageBox.warning(
+                    self, "Data Tidak Ditemukan", "Catatan kunjungan sudah tidak tersedia."
+                )
+            self.search_visitors_ui()
+            self.refresh_dashboard()
+        except Exception as error:
+            QtWidgets.QMessageBox.critical(
+                self, "Gagal", f"Gagal menghapus catatan kunjungan:\n{error}"
+            )
+
     def load_visitors(self):
         c = self.db.conn.cursor()
         # Explicit column selection to avoid schema mismatch
@@ -7595,8 +8116,8 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
         """Tampilkan beberapa statistik terkait dalam satu dialog bertab."""
         dialog = QtWidgets.QDialog(self)
         dialog.setWindowTitle(title)
-        dialog.resize(780, 560)
-        dialog.setMinimumSize(650, 450)
+        dialog.resize(1050, 720)
+        dialog.setMinimumSize(800, 550)
         layout = QtWidgets.QVBoxLayout(dialog)
 
         filter_layout = QtWidgets.QHBoxLayout()
@@ -7621,6 +8142,12 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
             page_layout = QtWidgets.QVBoxLayout(page)
             table = QtWidgets.QTableWidget(0, len(headers) + 1)
             table.setHorizontalHeaderLabels(["Peringkat", *headers])
+            table.setWordWrap(False)
+            table.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
+            table.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollPerPixel)
+            table.horizontalHeader().setSectionResizeMode(
+                QtWidgets.QHeaderView.ResizeToContents
+            )
             table.horizontalHeader().setStretchLastSection(True)
             page_layout.addWidget(table)
 
@@ -7693,11 +8220,11 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
         def borrower_rows(days):
             return [
                 (nama, rayon, kamar, count)
-                for nama, count, kamar, rayon in self.db.get_top_borrower(limit=20, days=days)
+                for nama, count, kamar, rayon in self.db.get_top_borrower(limit=None, days=days)
             ]
 
         def rayon_rows(days):
-            return self.db.get_top_borrow_rayon(limit=20, days=days)
+            return self.db.get_top_borrow_rayon(limit=None, days=days)
 
         def room_rows(days):
             c = self.db.conn.cursor()
@@ -7706,11 +8233,10 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
             if days is not None:
                 date_filter = "AND datetime(b.tanggal_pinjam) >= datetime('now', '-' || ? || ' days')"
                 params.append(days)
-            params.append(20)
             c.execute(f'''SELECT COALESCE(m.rayon, '-'), COALESCE(m.kamar, '-'), COUNT(*) AS count
                           FROM borrows b LEFT JOIN members m ON b.member_id=m.id
                           WHERE b.member_id IS NOT NULL {date_filter}
-                          GROUP BY m.rayon, m.kamar ORDER BY count DESC LIMIT ?''', params)
+                          GROUP BY m.rayon, m.kamar ORDER BY count DESC''', params)
             return c.fetchall()
 
         self._show_ranked_info_dialog(
@@ -8276,8 +8802,11 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
             # Create pie chart
             fig, ax = plt.subplots(figsize=(10, 7))
             colors = plt.cm.Set3(range(len(labels)))
-            wedges, texts, autotexts = ax.pie(sizes, labels=labels, autopct='%1.1f%%', 
-                                               colors=colors, startangle=90)
+            pie_output = ax.pie(sizes, labels=labels, autopct='%1.1f%%', 
+                                colors=colors, startangle=90)
+            wedges = pie_output[0]
+            texts = pie_output[1]
+            autotexts = pie_output[2] if len(pie_output) > 2 else []
             
             # Improve text visibility
             for text in texts:
@@ -9113,12 +9642,17 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
         def on_cancel():
             dialog.reject()
         
+        btn_ok.setAutoDefault(True)
+        btn_ok.setDefault(True)
+        btn_cancel.setAutoDefault(False)
         btn_ok.clicked.connect(on_ok)
         btn_cancel.clicked.connect(on_cancel)
+        code_input.returnPressed.connect(on_ok)
         
         # Set focus dan show dialog
         code_input.setFocus()
-        dialog.exec()
+        QtCore.QTimer.singleShot(0, code_input.setFocus)
+        dialog.exec_()
         
         return result
 
@@ -9754,7 +10288,10 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
                 cell.alignment = header_alignment
             c = self.db.conn.cursor()
             c.execute('''SELECT s.id, s.created_at, s.dibuat_oleh, p.judul, p.penulis,
-                                i.jumlah, i.harga, (i.jumlah * i.harga), s.total
+                                i.jumlah, COALESCE(i.harga_asli, i.harga),
+                                (i.jumlah * COALESCE(i.harga_asli, i.harga)),
+                                (SELECT SUM(si.jumlah * COALESCE(si.harga_asli, si.harga))
+                                 FROM sale_items si WHERE si.sale_id=s.id)
                          FROM sales s
                          JOIN sale_items i ON i.sale_id=s.id
                          JOIN sale_products p ON p.id=i.product_id
@@ -10396,7 +10933,14 @@ class AuthWindow(QtWidgets.QWidget):
             if not code:
                 QtWidgets.QMessageBox.warning(dialog, "QR Kosong", "Arahkan scanner ke kartu pustakawan terlebih dahulu.")
                 return
-            dialog.close()
+            dialog.accept()
+
+        scan_button.clicked.connect(finish_scan)
+        barcode_input.returnPressed.connect(finish_scan)
+        cancel_button.clicked.connect(dialog.reject)
+        barcode_input.setFocus()
+        if dialog.exec_() == QtWidgets.QDialog.Accepted:
+            code = barcode_input.text().strip()
             user = self.db.get_user_by_barcode(code)
             if user:
                 self._open_main(user)
@@ -10405,12 +10949,6 @@ class AuthWindow(QtWidgets.QWidget):
                     self, "QR Tidak Terdaftar",
                     "QR Code ini tidak terdaftar sebagai kartu pustakawan."
                 )
-
-        scan_button.clicked.connect(finish_scan)
-        barcode_input.returnPressed.connect(finish_scan)
-        cancel_button.clicked.connect(dialog.reject)
-        barcode_input.setFocus()
-        dialog.exec_()
 
     def _create_register_page(self):
         w = QtWidgets.QWidget()
@@ -10732,11 +11270,28 @@ class AuthWindow(QtWidgets.QWidget):
             QtWidgets.QMessageBox.critical(self, "Error", "Data user tidak valid. Silakan login kembali.")
             return
         try:
+            app = QtWidgets.QApplication.instance()
+            if app is None:
+                raise RuntimeError("Aplikasi Qt tidak tersedia.")
+
+            previous_main = getattr(app, "_previous_main_window", None)
+            if previous_main is not None:
+                try:
+                    if hasattr(previous_main, "cleanup_resources"):
+                        previous_main.cleanup_resources()
+                    previous_main.close()
+                except Exception:
+                    pass
+                try:
+                    del app._previous_main_window
+                except Exception:
+                    pass
+
             main_win = MainWindow(db=self.db)
             main_win.current_user = user
             main_win.update_avatar_display()
+            app._active_window = main_win
             main_win.show()
-            # Close auth window
             self.close()
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Error", f"Gagal membuka aplikasi: {e}")
@@ -10781,6 +11336,7 @@ def main():
         auth = None
         try:
             auth = AuthWindow(db, start_page='register' if not db.list_users() else 'login')
+            app._active_window = auth
             auth.show()
             # AuthWindow will create and show MainWindow after successful auth
             sys.exit(app.exec_())

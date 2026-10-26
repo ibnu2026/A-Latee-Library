@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+    <Product Id="*" Name="@ Latee Library" Language="1057" Version="1.0.0.0" Manufacturer="Ahmad Ibnu Zaini" UpgradeCode="12345678-1234-1234-1234-111111111111">
+        <Package InstallerVersion="200" Compressed="yes" InstallScope="perMachine" />
+        <MajorUpgrade DowngradeErrorMessage="Versi lebih baru dari @ Latee Library sudah terinstall." />
+        <MediaTemplate />
+
+        <Feature Id="ProductFeature" Title="@ Latee Library" Level="1">
+            <ComponentRef Id="MainExecutable" />
+            <ComponentRef Id="AssetsFolder" />
+        </Feature>
+
+        <!-- Main Application Directory -->
+        <Directory Id="TARGETDIR" Name="SourceDir">
+            <Directory Id="ProgramFilesFolder">
+                <Directory Id="INSTALLFOLDER" Name="Latee Library" />
+            </Directory>
+            <Directory Id="ProgramMenuFolder">
+                <Directory Id="ApplicationProgramsFolder" Name="Latee Library" />
+            </Directory>
+        </Directory>
+
+        <!-- Main Executable Component -->
+        <DirectoryRef Id="INSTALLFOLDER">
+            <Component Id="MainExecutable" Guid="12345678-1234-1234-1234-222222222222">
+                <File Id="ApplicationExe" Name="@ Latee Library.exe" Source="dist/@ Latee Library.exe" KeyPath="yes" Checksum="yes" />
+            </Component>
+            <Component Id="AssetsFolder" Guid="12345678-1234-1234-1234-333333333333">
+                <File Id="AppIcon" Name="LOGO_transparent.ico" Source="assets/LOGO_transparent.ico" KeyPath="yes" />
+            </Component>
+        </DirectoryRef>
+
+        <!-- Start Menu Shortcuts -->
+        <DirectoryRef Id="ApplicationProgramsFolder">
+            <Component Id="StartMenuShortcut" Guid="12345678-1234-1234-1234-444444444444">
+                <Shortcut Id="ApplicationStartMenuShortcut" Name="@ Latee Library" Description="Aplikasi Manajemen Perpustakaan Digital" Target="[INSTALLFOLDER]@ Latee Library.exe" WorkingDirectory="INSTALLFOLDER" Icon="ApplicationIcon.exe" />
+                <RemoveFolder Id="ApplicationProgramsFolder" On="uninstall" />
+                <RegistryValue Root="HKCU" Key="Software\Ahmad Ibnu Zaini\@ Latee Library" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+            </Component>
+        </DirectoryRef>
+
+        <!-- Desktop Shortcut -->
+        <DirectoryRef Id="TARGETDIR">
+            <Component Id="DesktopShortcut" Guid="12345678-1234-1234-1234-555555555555">
+                <Shortcut Id="DesktopApplicationShortcut" Name="@ Latee Library" Description="Aplikasi Manajemen Perpustakaan Digital" Target="[INSTALLFOLDER]@ Latee Library.exe" WorkingDirectory="INSTALLFOLDER" Icon="ApplicationIcon.exe" />
+                <RegistryValue Root="HKCU" Key="Software\Ahmad Ibnu Zaini\@ Latee Library" Name="desktopshortcut" Type="integer" Value="1" KeyPath="yes" />
+            </Component>
+        </DirectoryRef>
+
+        <!-- Icon Reference -->
+        <Icon Id="ApplicationIcon.exe" SourceFile="assets/LOGO_transparent.ico" />
+
+        <!-- UI Localization -->
+        <UI>
+            <UIRef Id="WixUI_InstallDir" />
+        </UI>
+
+        <WixVariable Id="WixUILicenseRtf" Value="LICENSE.rtf" />
+    </Product>
+</Wix>

@@ -600,6 +600,9 @@ def _setup_tabs_content(main_window):
     
     # Table
     main_window.vis_table = QtWidgets.QTableWidget()
+    main_window.vis_table.setContextMenuPolicy(Qt.CustomContextMenu)
+    main_window.vis_table.customContextMenuRequested.connect(main_window.show_visitor_visit_context_menu)
+    QtWidgets.QShortcut(QtGui.QKeySequence.Delete, main_window.vis_table, main_window.delete_selected_visitor_visits)
     v_vis.addWidget(main_window.vis_table)
     
     main_window.load_visitors()
@@ -797,12 +800,13 @@ def _setup_tabs_content(main_window):
     main_window.btn_export_fines = QtWidgets.QPushButton(" Export Denda")
     main_window.btn_export_paid_fines = QtWidgets.QPushButton(" Export Denda Dibayar")
     main_window.btn_export_sales = QtWidgets.QPushButton(" Export Penjualan")
+    main_window.btn_export_registered_visitors = QtWidgets.QPushButton(" Export Pengunjung Terdaftar")
     main_window.btn_export_grafik = QtWidgets.QPushButton(" Export Grafik")
     
     report_buttons = [main_window.btn_export_books, main_window.btn_export_members,
                 main_window.btn_export_visitors, main_window.btn_export_borrows,
                 main_window.btn_export_fines, main_window.btn_export_paid_fines,
-                main_window.btn_export_sales]
+                main_window.btn_export_sales, main_window.btn_export_registered_visitors]
     for btn in report_buttons:
         btn.setStyleSheet("""
             QPushButton {
@@ -847,6 +851,7 @@ def _setup_tabs_content(main_window):
     main_window.btn_export_fines.clicked.connect(lambda: main_window.export_excel("fines"))
     main_window.btn_export_paid_fines.clicked.connect(lambda: main_window.export_excel("paid_fines"))
     main_window.btn_export_sales.clicked.connect(lambda: main_window.export_excel("sales"))
+    main_window.btn_export_registered_visitors.clicked.connect(lambda: main_window.export_excel("registered_visitors"))
     main_window.btn_export_grafik.clicked.connect(main_window.export_grafik_statistik)
     
     v_lap.addStretch()

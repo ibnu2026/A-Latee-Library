@@ -782,6 +782,7 @@ class RegisteredVisitorsDialog(QtWidgets.QDialog):
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.show_visitor_context_menu)
+        QtWidgets.QShortcut(QtGui.QKeySequence.Delete, self.table, self.delete_selected_visitor)
         layout.addWidget(self.table)
         
         # Close button
@@ -816,17 +817,110 @@ class RegisteredVisitorsDialog(QtWidgets.QDialog):
 
     def show_visitor_context_menu(self, position):
         row = self.table.rowAt(position.y())
-        if row < 0:
+        if row < 0 or row >= self.table.rowCount():
             return
 
         visitor_id_item = self.table.item(row, 0)
         if not visitor_id_item:
             return
 
+        selected_indexes = self.table.selectedIndexes()
+        selected_rows = sorted(list(set(idx.row() for idx in selected_indexes)))
+        if row not in selected_rows:
+            self.table.selectRow(row)
+            selected_rows = [row]
+
         menu = QtWidgets.QMenu(self)
-        action_edit = menu.addAction("Edit Data")
-        if menu.exec_(self.table.mapToGlobal(position)) == action_edit:
+        if len(selected_rows) > 1:
+            action_delete = menu.addAction(f"Hapus {len(selected_rows)} Data Pengunjung Terpilih")
+            action_edit = None
+        else:
+            action_edit = menu.addAction("Edit Data")
+            nama_item = self.table.item(row, 1)
+            nama_str = f" ({nama_item.text().strip()})" if nama_item and nama_item.text().strip() else ""
+            action_delete = menu.addAction(f"Hapus Data Pengunjung{nama_str}")
+
+        action = menu.exec_(self.table.mapToGlobal(position))
+        if action_edit and action == action_edit:
             self.edit_visitor_data(int(visitor_id_item.text()))
+        elif action == action_delete:
+            self.delete_selected_visitors(selected_rows)
+
+    def delete_selected_visitors(self, rows=None):
+        if rows is None:
+            selected_indexes = self.table.selectedIndexes()
+            rows = sorted(list(set(idx.row() for idx in selected_indexes)))
+
+        if not rows:
+            return
+
+        visitor_ids = []
+        visitor_names = []
+        for r in rows:
+            item_id = self.table.item(r, 0)
+            if item_id and item_id.text().strip().isdigit():
+                visitor_ids.append(int(item_id.text().strip()))
+                item_nama = self.table.item(r, 1)
+                if item_nama and item_nama.text().strip():
+                    visitor_names.append(item_nama.text().strip())
+
+        if not visitor_ids:
+            return
+
+        if len(visitor_ids) == 1:
+            nama = visitor_names[0] if visitor_names else ""
+            name_info = f" '{nama}'" if nama else ""
+            msg = f"Yakin ingin menghapus data pengunjung{name_info} beserta seluruh riwayat kunjungannya?"
+        else:
+            names_summary = ", ".join(visitor_names[:3])
+            if len(visitor_names) > 3:
+                names_summary += f", dan {len(visitor_names) - 3} lainnya"
+            msg = f"Yakin ingin menghapus {len(visitor_ids)} data pengunjung yang dipilih?\n({names_summary})\n\nSemua riwayat kunjungan pengunjung tersebut juga akan dihapus."
+
+        confirmation = QtWidgets.QMessageBox.question(
+            self,
+            "Hapus Data Pengunjung",
+            msg,
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No
+        )
+        if confirmation != QtWidgets.QMessageBox.Yes:
+            return
+
+        try:
+            deleted_count = 0
+            for vid in visitor_ids:
+                if self.db.delete_visitor(vid):
+                    deleted_count += 1
+
+            self.load_visitors()
+            parent_window = self.parent()
+            if parent_window:
+                if hasattr(parent_window, "load_visitors"):
+                    parent_window.load_visitors()
+                if hasattr(parent_window, "search_visitors_ui"):
+                    parent_window.search_visitors_ui()
+                if hasattr(parent_window, "refresh_dashboard"):
+                    parent_window.refresh_dashboard()
+                if hasattr(parent_window, "update_visitor_statistics"):
+                    parent_window.update_visitor_statistics()
+                if hasattr(parent_window, "fingerprint") and parent_window.fingerprint and parent_window.fingerprint.is_connected():
+                    try:
+                        parent_window.fingerprint.load_fingerprints_from_db(self.db)
+                    except Exception:
+                        pass
+
+            QtWidgets.QMessageBox.information(
+                self, "Berhasil", f"Berhasil menghapus {deleted_count} data pengunjung."
+            )
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Gagal", f"Gagal menghapus data pengunjung:\n{e}")
+
+    def delete_selected_visitor(self, row=None):
+        if row is not None:
+            self.delete_selected_visitors([row])
+        else:
+            self.delete_selected_visitors()
 
     def edit_visitor_data(self, visitor_id):
         try:
@@ -3301,6 +3395,30 @@ class Database:
             self.conn.rollback()
             raise
 
+    def delete_visitor(self, visitor_id):
+        """Hapus data pengunjung terdaftar beserta seluruh riwayat kunjungannya dan sidik jarinya."""
+        c = self.conn.cursor()
+        try:
+            c.execute('SELECT fingerprint_id FROM visitors WHERE id=?', (visitor_id,))
+            row = c.fetchone()
+            fp_id = row[0] if row else None
+
+            c.execute('DELETE FROM visitor_visits WHERE visitor_id=?', (visitor_id,))
+            c.execute('DELETE FROM visitors WHERE id=?', (visitor_id,))
+            deleted = c.rowcount > 0
+
+            if fp_id:
+                try:
+                    c.execute('DELETE FROM santri_fingerprints WHERE santri_id=?', (int(fp_id),))
+                except Exception:
+                    pass
+
+            self.conn.commit()
+            return deleted
+        except Exception:
+            self.conn.rollback()
+            raise
+
     def save_fingerprint_enrollment(self, santri_id, nama, template_bytes, rayon, kamar, quality=80):
         """
         Save enrolled fingerprint template from the ZKTeco reader.
@@ -3468,13 +3586,20 @@ class Database:
 
     def visitors_per_month(self, year):
         c = self.conn.cursor()
-        c.execute('SELECT waktu_kunjungan FROM visitor_visits')
+        c.execute('''
+            SELECT vv.waktu_kunjungan 
+            FROM visitor_visits vv
+            JOIN visitors v ON v.id = vv.visitor_id
+        ''')
         data = c.fetchall()
         monthly = defaultdict(int)
         for (w,) in data:
-            d = datetime.fromisoformat(w)
-            if d.year == year:
-                monthly[d.month] += 1
+            try:
+                d = datetime.fromisoformat(w)
+                if d.year == year:
+                    monthly[d.month] += 1
+            except Exception:
+                pass
         return monthly
 
     def borrows_per_month(self, year):
@@ -3483,9 +3608,12 @@ class Database:
         data = c.fetchall()
         monthly = defaultdict(int)
         for (w,) in data:
-            d = datetime.fromisoformat(w)
-            if d.year == year:
-                monthly[d.month] += 1
+            try:
+                d = datetime.fromisoformat(w)
+                if d.year == year:
+                    monthly[d.month] += 1
+            except Exception:
+                pass
         return monthly
 
     # ------------------- Statistik Dashboard ----------
@@ -3500,10 +3628,15 @@ class Database:
 
     def count_visitors_today(self):
         today = datetime.now().date().isoformat()
-        return self.conn.execute(
-            'SELECT COUNT(*) FROM visitor_visits WHERE DATE(waktu_kunjungan)=?',
-            (today,)
-        ).fetchone()[0]
+        return self.conn.execute('''
+            SELECT COUNT(*) 
+            FROM visitor_visits vv
+            JOIN visitors v ON v.id = vv.visitor_id
+            WHERE DATE(vv.waktu_kunjungan)=?
+        ''', (today,)).fetchone()[0]
+
+    def count_registered_visitors(self):
+        return self.conn.execute('SELECT COUNT(*) FROM visitors').fetchone()[0]
     
     # ================ STATISTICS FUNCTIONS ================
     def get_top_visitor(self, limit=5, days=None):
@@ -3791,7 +3924,11 @@ class LineChart(QtWidgets.QWidget):
         dates_vis = []
         dates_bor = []
         try:
-            c.execute('SELECT waktu_kunjungan FROM visitor_visits')
+            c.execute('''
+                SELECT vv.waktu_kunjungan 
+                FROM visitor_visits vv
+                JOIN visitors v ON v.id = vv.visitor_id
+            ''')
             dates_vis = [datetime.fromisoformat(r[0]) for r in c.fetchall() if r[0]]
         except Exception:
             dates_vis = []
@@ -4705,6 +4842,7 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
         self.vis_table = QtWidgets.QTableWidget()
         self.vis_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.vis_table.customContextMenuRequested.connect(self.show_visitor_visit_context_menu)
+        QtWidgets.QShortcut(QtGui.QKeySequence.Delete, self.vis_table, self.delete_selected_visitor_visits)
         v_vis.addWidget(self.vis_table)
         
         # Statistics section
@@ -5030,6 +5168,7 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
             ("Denda Belum Dibayar", " Export Denda ke Excel", "fines"),
             ("Denda Dibayar", " Export Denda Dibayar ke Excel", "paid_fines"),
             ("Penjualan", " Export Penjualan ke Excel", "sales"),
+            ("Pengunjung Terdaftar", " Export Pengunjung Terdaftar ke Excel", "registered_visitors"),
         ]
         report_style = """
             QPushButton { background: #f8fafc; color: #1e293b; border: 1px solid #cbd5e1;
@@ -7903,23 +8042,98 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
     # -------------------- PENGUNJUNG ------------------
     def show_visitor_visit_context_menu(self, position):
         row = self.vis_table.rowAt(position.y())
-        if row < 0:
+        if row < 0 or row >= self.vis_table.rowCount():
             return
 
-        visit_id_item = self.vis_table.item(row, 0)
-        if not visit_id_item:
-            return
+        selected_indexes = self.vis_table.selectedIndexes()
+        selected_rows = sorted(list(set(idx.row() for idx in selected_indexes)))
+
+        if row not in selected_rows:
+            self.vis_table.selectRow(row)
+            selected_rows = [row]
 
         menu = QtWidgets.QMenu(self)
-        delete_action = menu.addAction("Hapus Catatan Kunjungan")
-        if menu.exec_(self.vis_table.mapToGlobal(position)) == delete_action:
-            self.delete_visitor_visit(int(visit_id_item.text()))
+        if len(selected_rows) > 1:
+            delete_action = menu.addAction(f"Hapus {len(selected_rows)} Catatan Kunjungan Terpilih")
+        else:
+            nama_item = self.vis_table.item(row, 1)
+            nama_str = f" ({nama_item.text().strip()})" if nama_item and nama_item.text().strip() else ""
+            delete_action = menu.addAction(f"Hapus Catatan Kunjungan{nama_str}")
 
-    def delete_visitor_visit(self, visit_id):
+        menu.addSeparator()
+        refresh_action = menu.addAction("Muat Ulang / Refresh")
+
+        action = menu.exec_(self.vis_table.mapToGlobal(position))
+        if action == delete_action:
+            self.delete_selected_visitor_visits(selected_rows)
+        elif action == refresh_action:
+            self.search_visitors_ui()
+
+    def delete_selected_visitor_visits(self, rows=None):
+        if rows is None:
+            selected_indexes = self.vis_table.selectedIndexes()
+            rows = sorted(list(set(idx.row() for idx in selected_indexes)))
+
+        if not rows:
+            return
+
+        visit_ids = []
+        visitor_names = []
+        for r in rows:
+            item_id = self.vis_table.item(r, 0)
+            if item_id and item_id.text().strip().isdigit():
+                visit_ids.append(int(item_id.text().strip()))
+                item_nama = self.vis_table.item(r, 1)
+                if item_nama and item_nama.text().strip():
+                    visitor_names.append(item_nama.text().strip())
+
+        if not visit_ids:
+            return
+
+        if len(visit_ids) == 1:
+            nama = visitor_names[0] if visitor_names else ""
+            nama_info = f" untuk '{nama}'" if nama else ""
+            msg = f"Yakin ingin menghapus catatan kunjungan{nama_info}?"
+        else:
+            names_summary = ", ".join(visitor_names[:3])
+            if len(visitor_names) > 3:
+                names_summary += f", dan {len(visitor_names) - 3} lainnya"
+            msg = f"Yakin ingin menghapus {len(visit_ids)} catatan kunjungan yang dipilih?\n({names_summary})"
+
         confirmation = QtWidgets.QMessageBox.question(
             self,
             "Hapus Catatan Kunjungan",
-            "Yakin ingin menghapus catatan kunjungan ini?",
+            msg,
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No
+        )
+        if confirmation != QtWidgets.QMessageBox.Yes:
+            return
+
+        try:
+            deleted_count = 0
+            for vid in visit_ids:
+                if self.db.delete_visitor_visit(vid):
+                    deleted_count += 1
+
+            self.search_visitors_ui()
+            self.refresh_dashboard()
+            if hasattr(self, 'status'):
+                self.status.showMessage(f"[INFO] Berhasil menghapus {deleted_count} catatan kunjungan", 3000)
+            QtWidgets.QMessageBox.information(
+                self, "Berhasil", f"Berhasil menghapus {deleted_count} catatan kunjungan."
+            )
+        except Exception as error:
+            QtWidgets.QMessageBox.critical(
+                self, "Gagal", f"Gagal menghapus catatan kunjungan:\n{error}"
+            )
+
+    def delete_visitor_visit(self, visit_id, visitor_name=None):
+        name_info = f" untuk '{visitor_name}'" if visitor_name else ""
+        confirmation = QtWidgets.QMessageBox.question(
+            self,
+            "Hapus Catatan Kunjungan",
+            f"Yakin ingin menghapus catatan kunjungan{name_info} ini?",
             QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
             QtWidgets.QMessageBox.No
         )
@@ -7933,6 +8147,11 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
                 )
             self.search_visitors_ui()
             self.refresh_dashboard()
+            if hasattr(self, 'status'):
+                self.status.showMessage("[INFO] Catatan kunjungan berhasil dihapus", 3000)
+            QtWidgets.QMessageBox.information(
+                self, "Berhasil", "Catatan kunjungan berhasil dihapus."
+            )
         except Exception as error:
             QtWidgets.QMessageBox.critical(
                 self, "Gagal", f"Gagal menghapus catatan kunjungan:\n{error}"
@@ -10152,18 +10371,29 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
             fname = os.path.join(laporan_dir, fname)
             msg = f"Data buku berhasil diexport ke {os.path.basename(fname)}"
 
-        elif tipe == "visitors":
-            ws.title = "Pengunjung"
-            headers = ["ID", "Nama", "Rayon", "Kamar", "Fingerprint", "Tanggal", "Jam", "Waktu"]
-            ws.append(headers)
-            
-            # Apply header style
-            for cell in ws[1]:
+        elif tipe in ("visitors", "registered_visitors"):
+            if tipe == "registered_visitors":
+                ws_primary = ws
+                ws_primary.title = "Pengunjung Terdaftar"
+                ws_secondary = wb.create_sheet(title="Riwayat Kunjungan")
+                fname_base = "laporan_pengunjung_terdaftar.xlsx"
+                msg_base = "Data pengunjung terdaftar"
+            else:
+                ws_primary = ws
+                ws_primary.title = "Riwayat Kunjungan"
+                ws_secondary = wb.create_sheet(title="Pengunjung Terdaftar")
+                fname_base = "laporan_pengunjung.xlsx"
+                msg_base = "Data pengunjung"
+
+            # 1. Sheet Riwayat Kunjungan
+            ws_visits = ws_primary if tipe == "visitors" else ws_secondary
+            headers_visits = ["No", "ID Kunjungan", "Nama Pengunjung", "Rayon", "Kamar", "Fingerprint ID", "Tanggal", "Jam", "Sesi Waktu"]
+            ws_visits.append(headers_visits)
+            for cell in ws_visits[1]:
                 cell.fill = header_fill
                 cell.font = header_font
                 cell.alignment = header_alignment
-            
-            # Export data pengunjung dengan kamar dari tabel visitors
+
             c = self.db.conn.cursor()
             c.execute("""
                 SELECT vv.id, v.nama, v.rayon, v.kamar, v.fingerprint_id, vv.waktu_kunjungan
@@ -10171,38 +10401,118 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
                 JOIN visitors v ON v.id = vv.visitor_id
                 ORDER BY vv.id DESC
             """)
-            for row in c.fetchall():
+            visit_rows = c.fetchall()
+            for idx, row in enumerate(visit_rows, 1):
                 id_v, nama, rayon, kamar, fingerprint, waktu_iso = row
-                
-                # Parse waktu
                 try:
                     dt = datetime.fromisoformat(waktu_iso)
                     tanggal = dt.strftime("%d-%m-%Y")
                     jam = dt.strftime("%H:%M:%S")
                     waktu_status = self.get_waktu_kunjungan(dt.strftime("%H"))
-                except:
+                except Exception:
                     tanggal = "-"
                     jam = "-"
                     waktu_status = "-"
-                
-                # Waktu column will contain the period label (Siang/Malam/Luar Jam)
-                ws.append([id_v, nama, rayon if rayon else "-", kamar if kamar else "-", fingerprint if fingerprint else "-", tanggal, jam, waktu_status])
-            
-            # Auto-adjust column width
-            for column in ws.columns:
+                ws_visits.append([
+                    idx, id_v, nama, rayon if rayon else "-", kamar if kamar else "-",
+                    fingerprint if fingerprint else "-", tanggal, jam, waktu_status
+                ])
+
+            # Formatting baris data kunjungan
+            for r_idx in range(2, len(visit_rows) + 2):
+                ws_visits.cell(row=r_idx, column=1).alignment = Alignment(horizontal="center")
+                ws_visits.cell(row=r_idx, column=2).alignment = Alignment(horizontal="center")
+                ws_visits.cell(row=r_idx, column=3).alignment = Alignment(horizontal="left")
+                ws_visits.cell(row=r_idx, column=4).alignment = Alignment(horizontal="center")
+                ws_visits.cell(row=r_idx, column=5).alignment = Alignment(horizontal="center")
+                ws_visits.cell(row=r_idx, column=6).alignment = Alignment(horizontal="center")
+                ws_visits.cell(row=r_idx, column=7).alignment = Alignment(horizontal="center")
+                ws_visits.cell(row=r_idx, column=8).alignment = Alignment(horizontal="center")
+                ws_visits.cell(row=r_idx, column=9).alignment = Alignment(horizontal="center")
+
+            # Summary row kunjungan
+            total_r = len(visit_rows) + 2
+            sum_cell_vis = ws_visits.cell(row=total_r, column=1)
+            sum_cell_vis.value = f"Total Catatan Kunjungan: {len(visit_rows)} data"
+            sum_cell_vis.font = Font(bold=True)
+            sum_cell_vis.alignment = Alignment(horizontal="left")
+            ws_visits.merge_cells(start_row=total_r, start_column=1, end_row=total_r, end_column=9)
+
+            for column in ws_visits.columns:
                 max_length = 0
                 column_letter = column[0].column_letter
                 for cell in column:
                     try:
-                        if len(str(cell.value)) > max_length:
+                        if cell.value and len(str(cell.value)) > max_length:
                             max_length = len(str(cell.value))
-                    except:
+                    except Exception:
                         pass
-                adjusted_width = min(max_length + 2, 50)
-                ws.column_dimensions[column_letter].width = adjusted_width
-            
-            fname = "laporan_pengunjung.xlsx"
-            # Jika file dengan nama yang sama sudah diexport hari ini, tambahkan timestamp
+                ws_visits.column_dimensions[column_letter].width = min(max(max_length + 3, 11), 45)
+
+            # 2. Sheet Pengunjung Terdaftar
+            ws_reg = ws_primary if tipe == "registered_visitors" else ws_secondary
+            headers_reg = ["No", "ID Pengunjung", "Nama Pengunjung", "Rayon", "Kamar", "Fingerprint ID", "Total Kunjungan", "Kunjungan Terakhir"]
+            ws_reg.append(headers_reg)
+            for cell in ws_reg[1]:
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = header_alignment
+
+            c.execute("""
+                SELECT v.id, v.nama, v.rayon, v.kamar, v.fingerprint_id,
+                       COUNT(vv.id) as total_kunjungan,
+                       MAX(vv.waktu_kunjungan) as terakhir_kunjung
+                FROM visitors v
+                LEFT JOIN visitor_visits vv ON vv.visitor_id = v.id
+                GROUP BY v.id, v.nama, v.rayon, v.kamar, v.fingerprint_id
+                ORDER BY v.nama ASC
+            """)
+            reg_rows = c.fetchall()
+            for idx, (id_v, nama, rayon, kamar, fingerprint, total_kunj, last_visit) in enumerate(reg_rows, 1):
+                if last_visit:
+                    try:
+                        dt = datetime.fromisoformat(last_visit)
+                        last_visit_str = dt.strftime("%d-%m-%Y %H:%M:%S")
+                    except Exception:
+                        last_visit_str = str(last_visit)
+                else:
+                    last_visit_str = "-"
+                ws_reg.append([
+                    idx, id_v, nama, rayon if rayon else "-", kamar if kamar else "-",
+                    fingerprint if fingerprint else "-", total_kunj, last_visit_str
+                ])
+
+            # Formatting baris data pengunjung terdaftar
+            for r_idx in range(2, len(reg_rows) + 2):
+                ws_reg.cell(row=r_idx, column=1).alignment = Alignment(horizontal="center")
+                ws_reg.cell(row=r_idx, column=2).alignment = Alignment(horizontal="center")
+                ws_reg.cell(row=r_idx, column=3).alignment = Alignment(horizontal="left")
+                ws_reg.cell(row=r_idx, column=4).alignment = Alignment(horizontal="center")
+                ws_reg.cell(row=r_idx, column=5).alignment = Alignment(horizontal="center")
+                ws_reg.cell(row=r_idx, column=6).alignment = Alignment(horizontal="center")
+                ws_reg.cell(row=r_idx, column=7).alignment = Alignment(horizontal="center")
+                ws_reg.cell(row=r_idx, column=8).alignment = Alignment(horizontal="center")
+
+            # Summary row pengunjung terdaftar
+            total_reg_r = len(reg_rows) + 2
+            sum_cell_reg = ws_reg.cell(row=total_reg_r, column=1)
+            sum_cell_reg.value = f"Total Pengunjung Terdaftar: {len(reg_rows)} orang"
+            sum_cell_reg.font = Font(bold=True)
+            sum_cell_reg.alignment = Alignment(horizontal="left")
+            ws_reg.merge_cells(start_row=total_reg_r, start_column=1, end_row=total_reg_r, end_column=8)
+
+            for column in ws_reg.columns:
+                max_length = 0
+                column_letter = column[0].column_letter
+                for cell in column:
+                    try:
+                        if cell.value and len(str(cell.value)) > max_length:
+                            max_length = len(str(cell.value))
+                    except Exception:
+                        pass
+                ws_reg.column_dimensions[column_letter].width = min(max(max_length + 3, 11), 45)
+
+            fname = fname_base
             try:
                 if os.path.exists(os.path.join(laporan_dir, fname)):
                     mtime = datetime.fromtimestamp(os.path.getmtime(os.path.join(laporan_dir, fname)))
@@ -10212,7 +10522,7 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
             except Exception:
                 pass
             fname = os.path.join(laporan_dir, fname)
-            msg = f"Data pengunjung berhasil diexport ke {os.path.basename(fname)}"
+            msg = f"{msg_base} berhasil diexport ke {os.path.basename(fname)}"
 
         elif tipe == "members":
             ws.title = "Anggota"
@@ -10441,40 +10751,130 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
             visitors = self.db.visitors_per_month(year)
             borrows = self.db.borrows_per_month(year)
             months = range(1, 13)
-            
-            # Create figure dengan 2 subplots
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-            fig.suptitle(f'Statistik A Latee Library - Tahun {year}', fontsize=16, fontweight='bold')
-            
-            # Plot 1: Pengunjung dan Peminjaman gabung
-            visitor_data = [visitors.get(m, 0) for m in months]
-            borrow_data = [borrows.get(m, 0) for m in months]
             month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des']
             
-            ax1.plot(months, visitor_data, marker='o', label='Pengunjung', linewidth=2, color='#2E86AB')
-            ax1.plot(months, borrow_data, marker='s', label='Peminjaman', linewidth=2, color='#A23B72')
-            ax1.set_xlabel('Bulan', fontweight='bold')
-            ax1.set_ylabel('Jumlah', fontweight='bold')
-            ax1.set_title('Perbandingan Pengunjung vs Peminjaman', fontweight='bold')
+            visitor_data = [visitors.get(m, 0) for m in months]
+            borrow_data = [borrows.get(m, 0) for m in months]
+            total_vis = sum(visitor_data)
+            total_bor = sum(borrow_data)
+
+            # Get rayon distribution for visitors
+            c = self.db.conn.cursor()
+            c.execute('''
+                SELECT COALESCE(v.rayon, 'Lainnya') as r, COUNT(*) as cnt
+                FROM visitor_visits vv
+                JOIN visitors v ON v.id = vv.visitor_id
+                GROUP BY v.rayon
+                ORDER BY cnt DESC
+                LIMIT 6
+            ''')
+            rayon_data = c.fetchall()
+
+            # Get session distribution for visitors
+            c.execute('''
+                SELECT vv.waktu_kunjungan
+                FROM visitor_visits vv
+                JOIN visitors v ON v.id = vv.visitor_id
+            ''')
+            session_counts = {"Siang": 0, "Malam": 0, "Luar Jam": 0}
+            for (w_iso,) in c.fetchall():
+                try:
+                    dt = datetime.fromisoformat(w_iso)
+                    sess = self.get_waktu_kunjungan(dt.strftime("%H"))
+                    if sess in session_counts:
+                        session_counts[sess] += 1
+                    else:
+                        session_counts["Luar Jam"] += 1
+                except Exception:
+                    pass
+
+            # Create figure dengan 4 subplots (2x2)
+            fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
+            fig.patch.set_facecolor('#ffffff')
+            fig.suptitle(
+                f'Statistik A Latee Library - Tahun {year}\n'
+                f'(Total Kunjungan: {total_vis:,} | Total Peminjaman: {total_bor:,})',
+                fontsize=16, fontweight='bold', color='#1e293b'
+            )
+
+            # Plot 1: Line Chart Tren Bulanan
+            ax1.plot(months, visitor_data, marker='o', label=f'Pengunjung ({total_vis})', linewidth=2.5, color='#2563eb')
+            ax1.plot(months, borrow_data, marker='s', label=f'Peminjaman ({total_bor})', linewidth=2.5, color='#16a34a')
+            ax1.set_xlabel('Bulan', fontweight='bold', color='#334155')
+            ax1.set_ylabel('Jumlah', fontweight='bold', color='#334155')
+            ax1.set_title('Tren Bulanan Pengunjung vs Peminjaman', fontweight='bold', color='#1e293b', pad=10)
             ax1.set_xticks(months)
             ax1.set_xticklabels(month_names)
-            ax1.legend(loc='upper left')
-            ax1.grid(True, alpha=0.3)
-            
-            # Plot 2: Bar chart perbandingan
+            ax1.legend(loc='upper left', frameon=True, facecolor='white', edgecolor='#e2e8f0')
+            ax1.grid(True, alpha=0.3, linestyle='--')
+
+            # Plot 2: Bar Chart Bulanan Berdampingan
             x_pos = range(len(month_names))
-            width = 0.35
-            ax2.bar([p - width/2 for p in x_pos], visitor_data, width, label='Pengunjung', color='#2E86AB', alpha=0.8)
-            ax2.bar([p + width/2 for p in x_pos], borrow_data, width, label='Peminjaman', color='#A23B72', alpha=0.8)
-            ax2.set_xlabel('Bulan', fontweight='bold')
-            ax2.set_ylabel('Jumlah', fontweight='bold')
-            ax2.set_title('Statistik Bulanan', fontweight='bold')
+            width = 0.38
+            rects1 = ax2.bar([p - width/2 for p in x_pos], visitor_data, width, label='Pengunjung', color='#3b82f6', alpha=0.9)
+            rects2 = ax2.bar([p + width/2 for p in x_pos], borrow_data, width, label='Peminjaman', color='#22c55e', alpha=0.9)
+            ax2.set_xlabel('Bulan', fontweight='bold', color='#334155')
+            ax2.set_ylabel('Jumlah', fontweight='bold', color='#334155')
+            ax2.set_title('Perbandingan Volume Bulanan', fontweight='bold', color='#1e293b', pad=10)
             ax2.set_xticks(x_pos)
             ax2.set_xticklabels(month_names)
-            ax2.legend()
-            ax2.grid(True, alpha=0.3, axis='y')
-            
-            plt.tight_layout()
+            ax2.legend(loc='upper right', frameon=True, facecolor='white', edgecolor='#e2e8f0')
+            ax2.grid(True, alpha=0.3, axis='y', linestyle='--')
+
+            # Data labels on bars
+            for rect in rects1:
+                h = rect.get_height()
+                if h > 0:
+                    ax2.annotate(f'{int(h)}', xy=(rect.get_x() + rect.get_width()/2, h),
+                                 xytext=(0, 2), textcoords="offset points", ha='center', va='bottom', fontsize=8)
+            for rect in rects2:
+                h = rect.get_height()
+                if h > 0:
+                    ax2.annotate(f'{int(h)}', xy=(rect.get_x() + rect.get_width()/2, h),
+                                 xytext=(0, 2), textcoords="offset points", ha='center', va='bottom', fontsize=8)
+
+            # Plot 3: Distribusi Kunjungan per Rayon
+            if rayon_data:
+                r_labels = [r[0] for r in rayon_data]
+                r_vals = [r[1] for r in rayon_data]
+                colors_r = ['#0284c7', '#0ea5e9', '#38bdf8', '#7dd3fc', '#bae6fd', '#e0f2fe'][:len(r_labels)]
+                bars = ax3.barh(r_labels[::-1], r_vals[::-1], color=colors_r[::-1], edgecolor='#0284c7', linewidth=0.5)
+                ax3.set_xlabel('Jumlah Kunjungan', fontweight='bold', color='#334155')
+                ax3.set_title('Top Rayon Kunjungan Terbanyak', fontweight='bold', color='#1e293b', pad=10)
+                ax3.grid(True, alpha=0.3, axis='x', linestyle='--')
+                for bar in bars:
+                    w = bar.get_width()
+                    if w > 0:
+                        ax3.annotate(f'{int(w)}', xy=(w, bar.get_y() + bar.get_height()/2),
+                                     xytext=(3, 0), textcoords="offset points", ha='left', va='center', fontsize=9, fontweight='bold')
+            else:
+                ax3.text(0.5, 0.5, 'Belum ada data rayon', ha='center', va='center', color='#94a3b8')
+                ax3.set_title('Top Rayon Kunjungan', fontweight='bold', color='#1e293b')
+
+            # Plot 4: Distribusi Sesi Kunjungan
+            sess_labels = list(session_counts.keys())
+            sess_vals = list(session_counts.values())
+            total_sess = sum(sess_vals)
+            if total_sess > 0:
+                sess_colors = ['#f59e0b', '#6366f1', '#94a3b8']
+                wedges, texts, autotexts = ax4.pie(
+                    sess_vals, labels=sess_labels, autopct='%1.1f%%',
+                    startangle=140, colors=sess_colors,
+                    wedgeprops=dict(width=0.6, edgecolor='white', linewidth=2)
+                )
+                for t in texts:
+                    t.set_fontsize(10)
+                    t.set_fontweight('bold')
+                for at in autotexts:
+                    at.set_fontsize(9)
+                    at.set_fontweight('bold')
+                    at.set_color('white')
+                ax4.set_title('Distribusi Sesi Kunjungan', fontweight='bold', color='#1e293b', pad=10)
+            else:
+                ax4.text(0.5, 0.5, 'Belum ada data sesi kunjungan', ha='center', va='center', color='#94a3b8')
+                ax4.set_title('Distribusi Sesi Kunjungan', fontweight='bold', color='#1e293b')
+
+            plt.tight_layout(rect=[0, 0.03, 1, 0.95])
             
             # Save dengan timestamp
             fname = os.path.join(laporan_dir, f"grafik_statistik_{year}.png")
@@ -10484,7 +10884,7 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
                     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     fname = fname.replace(".png", f"_{stamp}.png")
             
-            plt.savefig(fname, dpi=150, bbox_inches='tight')
+            plt.savefig(fname, dpi=180, bbox_inches='tight')
             plt.close()
             
             QtWidgets.QMessageBox.information(

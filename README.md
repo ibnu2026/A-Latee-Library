@@ -1,8 +1,8 @@
 # @ Latee Library - Desktop Application
 
-**Version**: 1.0.0  
+**Version**: 1.0.1  
 **Status**: ✅ Production Ready  
-**Last Updated**: November 2025
+**Last Updated**: November 2026
 
 ---
 
@@ -58,8 +58,9 @@ Generated databases, QR codes, reports, and build artifacts are local applicatio
 
 - **Export Data**: Books, visitors, borrowing records
 - **Monthly Statistics**: Visual charts (line + bar graphs)
-- **PNG Charts**: High-quality visualization (150 DPI)
+- **PNG Charts**: High-quality visualization (300 DPI)
 - **Excel Reports**: Comprehensive data export
+- **Save Reports**: Excel reports and PNG charts default to `%APPDATA%\Latee Library\laporan`; choose another location in the save dialog if needed.
 
 ### 6. **Staff Management**
 
@@ -114,12 +115,13 @@ The application uses the database in the current Windows user's AppData folder. 
 
 ## 🚀 Installation (NSIS)
 
-1. Download installer: `setup.exe`
+1. Download `Latee_Library_Installer_v1.0.1.exe` from [GitHub Releases](https://github.com/ibnu2026/A-Latee-Library/releases/latest).
 2. Run installer (choose Program Files location)
 3. Creates `C:\Users\[username]\@ Latee Library\` for data storage
 4. Desktop shortcut for quick access
 
 **Note**: Executable path can be anywhere; data files always in user home directory for permission compatibility.
+**Windows security**: The installer is not digitally signed, so Windows may display a SmartScreen warning. Only run it if you downloaded it from this repository's Releases page.
 
 ---
 

@@ -203,6 +203,33 @@ def get_database_path():
 
 DB_FILE = get_database_path()
 
+
+def get_reports_directory():
+    """Return the reports folder beside the active application database."""
+    reports_directory = os.path.join(os.path.dirname(DB_FILE), "laporan")
+    os.makedirs(reports_directory, exist_ok=True)
+    return reports_directory
+
+
+def choose_report_save_path(parent, filename, file_filter, extension):
+    """Ask where to save an export, defaulting to the active database's reports folder."""
+    reports_directory = get_reports_directory()
+    suggested_path = os.path.join(reports_directory, filename)
+    if os.path.exists(suggested_path):
+        name, suffix = os.path.splitext(filename)
+        suggested_path = os.path.join(
+            reports_directory,
+            f"{name}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}{suffix or extension}"
+        )
+
+    filepath, _ = QtWidgets.QFileDialog.getSaveFileName(
+        parent, "Simpan Hasil Ekspor", suggested_path, file_filter
+    )
+    if filepath and not os.path.splitext(filepath)[1]:
+        filepath += extension
+    return filepath
+
+
 # =======================================================
 # ============== VISITOR REGISTRATION DIALOG ==============
 # =======================================================
@@ -7148,18 +7175,11 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
 
     def export_imported_members_to_excel(self, members):
         """Buat Excel untuk anggota yang berhasil ditambahkan dari satu impor."""
-        from pathlib import Path
         from openpyxl import Workbook
         from openpyxl.styles import Alignment, Font, PatternFill
 
-        if hasattr(sys, '_MEIPASS'):
-            laporan_dir = os.path.join(str(Path.home()), "A Latee Library", "laporan")
-        else:
-            laporan_dir = "laporan"
-        os.makedirs(laporan_dir, exist_ok=True)
-
         filename = f"Data_Anggota_QR_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.xlsx"
-        filepath = os.path.join(laporan_dir, filename)
+        filepath = os.path.join(get_reports_directory(), filename)
 
         workbook = Workbook()
         worksheet = workbook.active
@@ -8773,20 +8793,11 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
         try:
             from openpyxl import Workbook
             from openpyxl.styles import Font, PatternFill, Alignment
-            import os
-            from pathlib import Path
         except ImportError:
             QtWidgets.QMessageBox.warning(self, "Error", "openpyxl belum terinstall.\nInstall: pip install openpyxl")
             return
         
         try:
-            # Create laporan folder
-            if hasattr(sys, '_MEIPASS'):
-                laporan_dir = os.path.join(str(Path.home()), "A Latee Library", "laporan")
-            else:
-                laporan_dir = "laporan"
-            os.makedirs(laporan_dir, exist_ok=True)
-            
             # Get data
             top_visitors = self.db.get_top_visitor(limit=100, days=days)
             
@@ -8832,13 +8843,19 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
             ws.column_dimensions['C'].width = 12
             ws.column_dimensions['D'].width = 12
             ws.column_dimensions['E'].width = 18
+            ws.freeze_panes = "A4"
+            ws.auto_filter.ref = f"A3:E{ws.max_row}"
             
             # Save file with timestamp
             fname = f"Statistik_Pengunjung_Terbanyak_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-            filepath = os.path.join(laporan_dir, fname)
+            filepath = choose_report_save_path(
+                self, fname, "Excel Workbook (*.xlsx)", ".xlsx"
+            )
+            if not filepath:
+                return
             wb.save(filepath)
             
-            QtWidgets.QMessageBox.information(self, "Sukses", f"Data berhasil di-export ke:\nlaporan/{fname}")
+            QtWidgets.QMessageBox.information(self, "Sukses", f"Data berhasil disimpan ke:\n{filepath}")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Error", f"Gagal export data:\n{e}")
     
@@ -8847,20 +8864,11 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
         try:
             from openpyxl import Workbook
             from openpyxl.styles import Font, PatternFill, Alignment
-            import os
-            from pathlib import Path
         except ImportError:
             QtWidgets.QMessageBox.warning(self, "Error", "openpyxl belum terinstall.\nInstall: pip install openpyxl")
             return
         
         try:
-            # Create laporan folder
-            if hasattr(sys, '_MEIPASS'):
-                laporan_dir = os.path.join(str(Path.home()), "A Latee Library", "laporan")
-            else:
-                laporan_dir = "laporan"
-            os.makedirs(laporan_dir, exist_ok=True)
-            
             # Get data
             top_rooms = self.db.get_top_rayon(limit=100, days=days)
             
@@ -8902,13 +8910,19 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
             ws.column_dimensions['A'].width = 12
             ws.column_dimensions['B'].width = 25
             ws.column_dimensions['C'].width = 18
+            ws.freeze_panes = "A4"
+            ws.auto_filter.ref = f"A3:C{ws.max_row}"
             
             # Save file with timestamp
             fname = f"Statistik_Kamar_Terbanyak_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-            filepath = os.path.join(laporan_dir, fname)
+            filepath = choose_report_save_path(
+                self, fname, "Excel Workbook (*.xlsx)", ".xlsx"
+            )
+            if not filepath:
+                return
             wb.save(filepath)
             
-            QtWidgets.QMessageBox.information(self, "Sukses", f"Data berhasil di-export ke:\nlaporan/{fname}")
+            QtWidgets.QMessageBox.information(self, "Sukses", f"Data berhasil disimpan ke:\n{filepath}")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Error", f"Gagal export data:\n{e}")
     
@@ -8917,20 +8931,11 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
         try:
             from openpyxl import Workbook
             from openpyxl.styles import Font, PatternFill, Alignment
-            import os
-            from pathlib import Path
         except ImportError:
             QtWidgets.QMessageBox.warning(self, "Error", "openpyxl belum terinstall.\nInstall: pip install openpyxl")
             return
         
         try:
-            # Create laporan folder
-            if hasattr(sys, '_MEIPASS'):
-                laporan_dir = os.path.join(str(Path.home()), "A Latee Library", "laporan")
-            else:
-                laporan_dir = "laporan"
-            os.makedirs(laporan_dir, exist_ok=True)
-            
             # Get data
             top_borrowers = self.db.get_top_borrower(limit=100, days=days)
             
@@ -8976,13 +8981,19 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
             ws.column_dimensions['C'].width = 12
             ws.column_dimensions['D'].width = 12
             ws.column_dimensions['E'].width = 18
+            ws.freeze_panes = "A4"
+            ws.auto_filter.ref = f"A3:E{ws.max_row}"
             
             # Save file with timestamp
             fname = f"Statistik_Peminjam_Terbanyak_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-            filepath = os.path.join(laporan_dir, fname)
+            filepath = choose_report_save_path(
+                self, fname, "Excel Workbook (*.xlsx)", ".xlsx"
+            )
+            if not filepath:
+                return
             wb.save(filepath)
             
-            QtWidgets.QMessageBox.information(self, "Sukses", f"Data berhasil di-export ke:\nlaporan/{fname}")
+            QtWidgets.QMessageBox.information(self, "Sukses", f"Data berhasil disimpan ke:\n{filepath}")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Error", f"Gagal export data:\n{e}")
     
@@ -8991,8 +9002,6 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
         try:
             import matplotlib.pyplot as plt
             from matplotlib import rcParams
-            import os
-            from pathlib import Path
             # Set font untuk mendukung bahasa Indonesia
             rcParams['font.sans-serif'] = ['Arial']
         except ImportError:
@@ -9000,13 +9009,6 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
             return
         
         try:
-            # Create laporan folder
-            if hasattr(sys, '_MEIPASS'):
-                laporan_dir = os.path.join(str(Path.home()), "A Latee Library", "laporan")
-            else:
-                laporan_dir = "laporan"
-            os.makedirs(laporan_dir, exist_ok=True)
-            
             # Get data
             top_rooms = self.db.get_top_rayon(limit=10, days=days)
             
@@ -9042,11 +9044,16 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
             
             # Save figure with timestamp
             fname = f"Diagram_Kamar_Terbanyak_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-            filepath = os.path.join(laporan_dir, fname)
+            filepath = choose_report_save_path(
+                self, fname, "PNG Image (*.png)", ".png"
+            )
+            if not filepath:
+                plt.close(fig)
+                return
             plt.savefig(filepath, dpi=300, bbox_inches='tight')
             plt.close()
             
-            QtWidgets.QMessageBox.information(self, "Sukses", f"Diagram berhasil di-export ke:\nlaporan/{fname}")
+            QtWidgets.QMessageBox.information(self, "Sukses", f"Diagram berhasil disimpan ke:\n{filepath}")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Error", f"Gagal export diagram:\n{e}")
 
@@ -10309,19 +10316,7 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
             QtWidgets.QMessageBox.warning(self, "Error", "Package 'openpyxl' belum diinstall.\nJalankan: pip install openpyxl")
             return
         
-        import os
-        from pathlib import Path
-        
-        # Create laporan folder di user home directory untuk compatibility
-        if hasattr(sys, '_MEIPASS'):
-            # Running dari executable (pyinstaller/NSIS)
-            laporan_dir = os.path.join(str(Path.home()), "A Latee Library", "laporan")
-        else:
-            # Running dari source
-            laporan_dir = "laporan"
-        
-        os.makedirs(laporan_dir, exist_ok=True)
-            
+        laporan_dir = get_reports_directory()
         wb = openpyxl.Workbook()
         ws = wb.active
         
@@ -10716,34 +10711,37 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
             msg = f"Data peminjaman berhasil diexport ke {os.path.basename(fname)}"
 
         for report_sheet in wb.worksheets:
+            report_sheet.freeze_panes = "A2"
             for column in report_sheet.columns:
                 values = [len(str(cell.value or "")) for cell in column]
                 if values:
                     report_sheet.column_dimensions[column[0].column_letter].width = min(max(values) + 2, 50)
 
-        wb.save(fname)
+        filepath = choose_report_save_path(
+            self, os.path.basename(fname), "Excel Workbook (*.xlsx)", ".xlsx"
+        )
+        if not filepath:
+            return
+
+        try:
+            wb.save(filepath)
+        except OSError as e:
+            QtWidgets.QMessageBox.critical(
+                self, "Gagal Menyimpan Laporan", f"Laporan gagal disimpan:\n{e}"
+            )
+            return
         # Tampilkan satu pesan sukses saja (hindari duplikat)
-        QtWidgets.QMessageBox.information(self, "Berhasil", msg)
-        self.status.showMessage(f"[SUCCESS] Laporan {tipe} disimpan sebagai {fname}")
+        QtWidgets.QMessageBox.information(self, "Berhasil", f"{msg}\n\nLokasi: {filepath}")
+        self.status.showMessage(f"[SUCCESS] Laporan {tipe} disimpan sebagai {filepath}")
 
     # -------------------- EXPORT GRAFIK STATISTIK -----------------
     def export_grafik_statistik(self):
         """Export grafik statistik pengunjung dan peminjaman ke PNG"""
         try:
             import matplotlib.pyplot as plt
-            import os
-            from pathlib import Path
         except ImportError:
             QtWidgets.QMessageBox.warning(self, "Error", "Package 'matplotlib' belum diinstall.\nJalankan: pip install matplotlib")
             return
-        
-        # Create laporan folder
-        if hasattr(sys, '_MEIPASS'):
-            laporan_dir = os.path.join(str(Path.home()), "A Latee Library", "laporan")
-        else:
-            laporan_dir = "laporan"
-        
-        os.makedirs(laporan_dir, exist_ok=True)
         
         try:
             # Get data dari database
@@ -10764,10 +10762,11 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
                 SELECT COALESCE(v.rayon, 'Lainnya') as r, COUNT(*) as cnt
                 FROM visitor_visits vv
                 JOIN visitors v ON v.id = vv.visitor_id
+                WHERE strftime('%Y', datetime(vv.waktu_kunjungan)) = ?
                 GROUP BY v.rayon
                 ORDER BY cnt DESC
                 LIMIT 6
-            ''')
+            ''', (str(year),))
             rayon_data = c.fetchall()
 
             # Get session distribution for visitors
@@ -10775,7 +10774,8 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
                 SELECT vv.waktu_kunjungan
                 FROM visitor_visits vv
                 JOIN visitors v ON v.id = vv.visitor_id
-            ''')
+                WHERE strftime('%Y', datetime(vv.waktu_kunjungan)) = ?
+            ''', (str(year),))
             session_counts = {"Siang": 0, "Malam": 0, "Luar Jam": 0}
             for (w_iso,) in c.fetchall():
                 try:
@@ -10877,21 +10877,22 @@ Kode | Kategori | Judul | Penulis | Penerbit | Stok | Status
             plt.tight_layout(rect=[0, 0.03, 1, 0.95])
             
             # Save dengan timestamp
-            fname = os.path.join(laporan_dir, f"grafik_statistik_{year}.png")
-            if os.path.exists(fname):
-                mtime = datetime.fromtimestamp(os.path.getmtime(fname))
-                if mtime.date() == datetime.now().date():
-                    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    fname = fname.replace(".png", f"_{stamp}.png")
-            
-            plt.savefig(fname, dpi=180, bbox_inches='tight')
+            fname = f"grafik_statistik_{year}.png"
+            filepath = choose_report_save_path(
+                self, fname, "PNG Image (*.png)", ".png"
+            )
+            if not filepath:
+                plt.close(fig)
+                return
+
+            fig.savefig(filepath, dpi=300, bbox_inches='tight')
             plt.close()
             
             QtWidgets.QMessageBox.information(
                 self, "[SUCCESS] Berhasil", 
-                f"Grafik statistik berhasil diexport ke:\n{os.path.basename(fname)}"
+                f"Grafik statistik berhasil disimpan ke:\n{filepath}"
             )
-            self.status.showMessage(f"[SUCCESS] Grafik statistik disimpan sebagai {os.path.basename(fname)}")
+            self.status.showMessage(f"[SUCCESS] Grafik statistik disimpan sebagai {filepath}")
             
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "[ERROR] Error", f"Gagal export grafik:\n{e}")
